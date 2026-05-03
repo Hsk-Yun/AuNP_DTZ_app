@@ -1,5 +1,5 @@
 streamlit==1.40.0
-streamlit-drawable-canvas==0.9.3
+streamlit-image-coordinates
 pandas
 numpy
 scikit-learn
