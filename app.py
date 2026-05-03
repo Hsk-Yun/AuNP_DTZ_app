@@ -1,4 +1,7 @@
 import os
+import io
+import hashlib
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,6 +12,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from streamlit_image_coordinates import streamlit_image_coordinates
 
+
+# =========================================================
+# 기본 설정
+# =========================================================
 st.set_page_config(page_title="Heavy Metal Color Sensing", layout="wide")
 
 DATA_PATH = "training_data.csv"
@@ -19,6 +26,9 @@ st.title("중금속 이미지 색센싱 웹앱")
 st.caption("CIE Lab 기반 distance-weighted kNN 8 Group 분류 모델")
 
 
+# =========================================================
+# 학습 데이터 로드
+# =========================================================
 @st.cache_data
 def load_training_data():
     if not os.path.exists(DATA_PATH):
@@ -44,9 +54,10 @@ def load_training_data():
     df = df[~df["Group"].isin(["", "nan", "None"])]
     df = df.dropna(subset=["Group"] + FEATURES + ["ppm"])
 
-    # Orange3에서 했던 것처럼 0 ppm blank는 학습에서 제외
+    # Orange3에서 분석한 조건과 맞추기 위해 0 ppm blank는 학습에서 제외
     df = df[df["ppm"] > 0]
 
+    # 검증된 추가 데이터가 있을 경우 병합
     if os.path.exists(AUG_PATH):
         aug = pd.read_csv(AUG_PATH)
 
@@ -62,11 +73,15 @@ def load_training_data():
             aug = aug[~aug["Group"].isin(["", "nan", "None"])]
             aug = aug.dropna(subset=["Group"] + FEATURES + ["ppm"])
             aug = aug[aug["ppm"] > 0]
+
             df = pd.concat([df, aug], ignore_index=True)
 
     return df
 
 
+# =========================================================
+# 색 변환 및 ROI 함수
+# =========================================================
 def rgb_to_lab(rgb):
     arr = np.array(rgb, dtype=np.float32).reshape(1, 1, 3) / 255.0
     return rgb2lab(arr)[0, 0]
@@ -78,7 +93,7 @@ def calc_delta_e(sample_lab, blank_lab):
 
 def robust_rgb_from_point(image, x, y, roi_size, keep_percent=65):
     """
-    선택한 점 주변 ROI에서 RGB를 추출한다.
+    선택한 점 주변 ROI에서 RGB 추출.
     반사광, 그림자, 종이 배경처럼 튀는 픽셀을 줄이기 위해
     중심 색과 유사한 픽셀 위주로 선별한 뒤 median RGB를 사용한다.
     """
@@ -138,6 +153,32 @@ def robust_rgb_from_point(image, x, y, roi_size, keep_percent=65):
     return robust_rgb, kept_ratio
 
 
+def draw_points(image, blank_point, sample_point, roi_size):
+    img = image.copy()
+    draw = ImageDraw.Draw(img)
+
+    half = roi_size // 2
+
+    def draw_one(point, color, label):
+        if point is None:
+            return
+
+        x, y = point
+        box = (x - half, y - half, x + half, y + half)
+
+        draw.rectangle(box, outline=color, width=4)
+        draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=color)
+        draw.text((x + 8, y + 8), label, fill=color)
+
+    draw_one(blank_point, "blue", "Blank")
+    draw_one(sample_point, "red", "Sample")
+
+    return img
+
+
+# =========================================================
+# kNN 모델
+# =========================================================
 def build_group_model(df):
     X = df[FEATURES]
     y = df["Group"]
@@ -156,6 +197,9 @@ def build_group_model(df):
 
 
 def predict_ppm_by_group(df, input_x, predicted_group, n_neighbors=3):
+    """
+    1차 예측된 Group 내부 데이터만 이용해 ppm을 다시 kNN으로 예측한다.
+    """
     group_df = df[df["Group"] == predicted_group].copy()
     group_df = group_df.dropna(subset=FEATURES + ["ppm"])
 
@@ -185,29 +229,9 @@ def predict_ppm_by_group(df, input_x, predicted_group, n_neighbors=3):
     return int(ppm_pred), ppm_classes, ppm_proba
 
 
-def draw_points(image, blank_point, sample_point, roi_size):
-    img = image.copy()
-    draw = ImageDraw.Draw(img)
-
-    half = roi_size // 2
-
-    def draw_one(point, color, label):
-        if point is None:
-            return
-
-        x, y = point
-        box = (x - half, y - half, x + half, y + half)
-
-        draw.rectangle(box, outline=color, width=4)
-        draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=color)
-        draw.text((x + 8, y + 8), label, fill=color)
-
-    draw_one(blank_point, "blue", "Blank")
-    draw_one(sample_point, "red", "Sample")
-
-    return img
-
-
+# =========================================================
+# 세션 상태 초기화
+# =========================================================
 df = load_training_data()
 group_model = build_group_model(df)
 group_classes = group_model.named_steps["kneighborsclassifier"].classes_
@@ -231,6 +255,9 @@ if "image_id" not in st.session_state:
     st.session_state.image_id = None
 
 
+# =========================================================
+# 사이드바
+# =========================================================
 st.sidebar.header("Model Setting")
 st.sidebar.write("Features: L*, a*, b*, ΔE")
 st.sidebar.write("1st: kNN 8 Group classification")
@@ -285,6 +312,9 @@ st.sidebar.write(f"Training positive min ΔE: {positive_min_deltaE:.2f}")
 st.sidebar.write(f"Training positive 5% ΔE: {positive_q05_deltaE:.2f}")
 
 
+# =========================================================
+# 이미지 입력
+# =========================================================
 st.subheader("1. 이미지 입력")
 
 input_method = st.radio(
@@ -302,7 +332,8 @@ else:
 
 
 if image_file is not None:
-    current_image_id = getattr(image_file, "name", "camera_image")
+    image_bytes = image_file.getvalue()
+    current_image_id = hashlib.md5(image_bytes).hexdigest()
 
     if st.session_state.image_id != current_image_id:
         st.session_state.blank_point = None
@@ -310,7 +341,7 @@ if image_file is not None:
         st.session_state.last_result = None
         st.session_state.image_id = current_image_id
 
-    image = Image.open(image_file).convert("RGB")
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     orig_w, orig_h = image.size
 
     display_width = min(display_width, orig_w)
@@ -348,12 +379,11 @@ if image_file is not None:
             st.session_state.blank_point = None
             st.session_state.sample_point = None
             st.session_state.last_result = None
-            st.rerun()
 
     if st.session_state.selection_mode == "blank":
-        st.info("현재 모드: Blank 선택. 이미지에서 blank 위치를 클릭하세요.")
+        st.info("현재 모드: Blank 선택. 이미지에서 Blank 위치를 클릭하세요.")
     else:
-        st.info("현재 모드: Sample 선택. 이미지에서 sample 위치를 클릭하세요.")
+        st.info("현재 모드: Sample 선택. 이미지에서 Sample 위치를 클릭하세요.")
 
     preview_image = draw_points(
         display_image,
@@ -362,9 +392,12 @@ if image_file is not None:
         roi_size_display
     )
 
-    clicked = streamlit_image_coordinates(preview_image, key="image_coordinates")
+    clicked = streamlit_image_coordinates(
+        preview_image,
+        key=f"image_coordinates_{st.session_state.image_id}_{st.session_state.selection_mode}"
+    )
 
-    if clicked is not None:
+    if clicked is not None and clicked.get("x") is not None and clicked.get("y") is not None:
         click_point = (int(clicked["x"]), int(clicked["y"]))
 
         if st.session_state.selection_mode == "blank":
@@ -372,6 +405,7 @@ if image_file is not None:
         else:
             st.session_state.sample_point = click_point
 
+        st.session_state.last_result = None
         st.rerun()
 
     col_pos1, col_pos2 = st.columns(2)
@@ -542,6 +576,9 @@ else:
     st.info("사진을 업로드하거나 카메라로 촬영하세요.")
 
 
+# =========================================================
+# 검증된 데이터 추가 저장
+# =========================================================
 if st.session_state.last_result is not None:
     st.subheader("5. 검증된 데이터 추가 저장")
 
