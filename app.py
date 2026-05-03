@@ -2,20 +2,20 @@ import os
 import streamlit as st
 import pandas as pd
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from skimage.color import rgb2lab
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
-from streamlit_drawable_canvas import st_canvas
+from streamlit_image_coordinates import streamlit_image_coordinates
 
-st.set_page_config(page_title="AuNP@DTZ Heavy Metal Color Sensing", layout="wide")
+st.set_page_config(page_title="Heavy Metal Color Sensing", layout="wide")
 
 DATA_PATH = "training_data.csv"
 AUG_PATH = "training_data_augmented.csv"
 FEATURES = ["L", "a", "b", "deltaE"]
 
-st.title("AuNP@DTZ 중금속 이미지 색센싱 웹앱")
+st.title("중금속 이미지 색센싱 웹앱")
 st.caption("CIE Lab 기반 distance-weighted kNN 8 Group 분류 모델")
 
 
@@ -44,10 +44,9 @@ def load_training_data():
     df = df[~df["Group"].isin(["", "nan", "None"])]
     df = df.dropna(subset=["Group"] + FEATURES + ["ppm"])
 
-    # Orange3에서 사용한 조건과 동일하게 0 ppm blank는 학습 데이터에서 제외
+    # Orange3에서 했던 것처럼 0 ppm blank는 학습에서 제외
     df = df[df["ppm"] > 0]
 
-    # 로컬 사용 시 검증된 추가 데이터 반영
     if os.path.exists(AUG_PATH):
         aug = pd.read_csv(AUG_PATH)
 
@@ -79,7 +78,7 @@ def calc_delta_e(sample_lab, blank_lab):
 
 def robust_rgb_from_point(image, x, y, roi_size, keep_percent=65):
     """
-    선택한 원 주변 ROI에서 RGB를 추출한다.
+    선택한 점 주변 ROI에서 RGB를 추출한다.
     반사광, 그림자, 종이 배경처럼 튀는 픽셀을 줄이기 위해
     중심 색과 유사한 픽셀 위주로 선별한 뒤 median RGB를 사용한다.
     """
@@ -157,9 +156,6 @@ def build_group_model(df):
 
 
 def predict_ppm_by_group(df, input_x, predicted_group, n_neighbors=3):
-    """
-    1차로 예측된 Group 내부 데이터만 이용해 ppm을 다시 kNN으로 예측한다.
-    """
     group_df = df[df["Group"] == predicted_group].copy()
     group_df = group_df.dropna(subset=FEATURES + ["ppm"])
 
@@ -189,36 +185,27 @@ def predict_ppm_by_group(df, input_x, predicted_group, n_neighbors=3):
     return int(ppm_pred), ppm_classes, ppm_proba
 
 
-def get_circle_centers(canvas_json):
-    """
-    canvas 내부의 파란 원을 Blank, 빨간 원을 Sample로 인식하고 중심 좌표를 반환한다.
-    """
-    if canvas_json is None or "objects" not in canvas_json:
-        return None, None
+def draw_points(image, blank_point, sample_point, roi_size):
+    img = image.copy()
+    draw = ImageDraw.Draw(img)
 
-    blank_center = None
-    sample_center = None
+    half = roi_size // 2
 
-    for obj in canvas_json["objects"]:
-        if obj.get("type") != "circle":
-            continue
+    def draw_one(point, color, label):
+        if point is None:
+            return
 
-        radius = obj.get("radius", 20)
-        scale_x = obj.get("scaleX", 1)
-        scale_y = obj.get("scaleY", 1)
+        x, y = point
+        box = (x - half, y - half, x + half, y + half)
 
-        cx = obj.get("left", 0) + radius * scale_x
-        cy = obj.get("top", 0) + radius * scale_y
+        draw.rectangle(box, outline=color, width=4)
+        draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=color)
+        draw.text((x + 8, y + 8), label, fill=color)
 
-        stroke = str(obj.get("stroke", "")).lower()
+    draw_one(blank_point, "blue", "Blank")
+    draw_one(sample_point, "red", "Sample")
 
-        if "blue" in stroke or "#0000ff" in stroke:
-            blank_center = (cx, cy)
-
-        if "red" in stroke or "#ff0000" in stroke:
-            sample_center = (cx, cy)
-
-    return blank_center, sample_center
+    return img
 
 
 df = load_training_data()
@@ -227,6 +214,21 @@ group_classes = group_model.named_steps["kneighborsclassifier"].classes_
 
 positive_min_deltaE = float(df["deltaE"].min())
 positive_q05_deltaE = float(df["deltaE"].quantile(0.05))
+
+if "blank_point" not in st.session_state:
+    st.session_state.blank_point = None
+
+if "sample_point" not in st.session_state:
+    st.session_state.sample_point = None
+
+if "selection_mode" not in st.session_state:
+    st.session_state.selection_mode = "blank"
+
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+
+if "image_id" not in st.session_state:
+    st.session_state.image_id = None
 
 
 st.sidebar.header("Model Setting")
@@ -300,6 +302,14 @@ else:
 
 
 if image_file is not None:
+    current_image_id = getattr(image_file, "name", "camera_image")
+
+    if st.session_state.image_id != current_image_id:
+        st.session_state.blank_point = None
+        st.session_state.sample_point = None
+        st.session_state.last_result = None
+        st.session_state.image_id = current_image_id
+
     image = Image.open(image_file).convert("RGB")
     orig_w, orig_h = image.size
 
@@ -312,8 +322,6 @@ if image_file is not None:
     display_image = image.resize((disp_w, disp_h))
 
     st.write(f"원본 이미지 크기: {orig_w} × {orig_h}")
-    st.write("파란 원 = Blank, 빨간 원 = Sample")
-    st.write("두 원을 마우스 또는 손가락으로 드래그해서 위치를 맞춘 뒤 **위치 확정 및 분석** 버튼을 누르세요.")
 
     roi_size_display = st.slider(
         "점 주변 RGB 평균 영역 크기(화면 표시 기준 px)",
@@ -323,59 +331,66 @@ if image_file is not None:
         step=2
     )
 
-    marker_radius = roi_size_display / 2
+    st.subheader("2. ROI 점 선택")
 
-    initial_drawing = {
-        "objects": [
-            {
-                "type": "circle",
-                "left": disp_w * 0.30 - marker_radius,
-                "top": disp_h * 0.50 - marker_radius,
-                "radius": marker_radius,
-                "fill": "rgba(0, 0, 255, 0.25)",
-                "stroke": "blue",
-                "strokeWidth": 4,
-            },
-            {
-                "type": "circle",
-                "left": disp_w * 0.65 - marker_radius,
-                "top": disp_h * 0.50 - marker_radius,
-                "radius": marker_radius,
-                "fill": "rgba(255, 0, 0, 0.25)",
-                "stroke": "red",
-                "strokeWidth": 4,
-            },
-        ]
-    }
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
 
-    st.info(
-        "ROI 크기를 먼저 정한 뒤, 파란 원과 빨간 원을 각각 Blank와 Sample 위치로 드래그하세요. "
-        "앱은 ROI 내부에서 반사광·그림자·종이 배경으로 보이는 튀는 픽셀을 일부 제거한 뒤 RGB를 계산합니다."
+    with col_btn1:
+        if st.button("Blank 선택"):
+            st.session_state.selection_mode = "blank"
+
+    with col_btn2:
+        if st.button("Sample 선택"):
+            st.session_state.selection_mode = "sample"
+
+    with col_btn3:
+        if st.button("ROI 초기화"):
+            st.session_state.blank_point = None
+            st.session_state.sample_point = None
+            st.session_state.last_result = None
+            st.rerun()
+
+    if st.session_state.selection_mode == "blank":
+        st.info("현재 모드: Blank 선택. 이미지에서 blank 위치를 클릭하세요.")
+    else:
+        st.info("현재 모드: Sample 선택. 이미지에서 sample 위치를 클릭하세요.")
+
+    preview_image = draw_points(
+        display_image,
+        st.session_state.blank_point,
+        st.session_state.sample_point,
+        roi_size_display
     )
 
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.25)",
-        stroke_width=4,
-        background_image=display_image,
-        width=disp_w,
-        height=disp_h,
-        drawing_mode="transform",
-        initial_drawing=initial_drawing,
-        update_streamlit=True,
-        key=f"canvas_{roi_size_display}_{display_width}",
-    )
+    clicked = streamlit_image_coordinates(preview_image, key="image_coordinates")
 
-    if st.button("위치 확정 및 분석"):
-        blank_center_disp, sample_center_disp = get_circle_centers(canvas_result.json_data)
+    if clicked is not None:
+        click_point = (int(clicked["x"]), int(clicked["y"]))
 
-        if blank_center_disp is None or sample_center_disp is None:
-            st.error("Blank 또는 Sample 위치를 찾지 못했습니다. 파란 원과 빨간 원이 모두 있는지 확인하세요.")
-
+        if st.session_state.selection_mode == "blank":
+            st.session_state.blank_point = click_point
         else:
-            blank_x = blank_center_disp[0] / scale
-            blank_y = blank_center_disp[1] / scale
-            sample_x = sample_center_disp[0] / scale
-            sample_y = sample_center_disp[1] / scale
+            st.session_state.sample_point = click_point
+
+        st.rerun()
+
+    col_pos1, col_pos2 = st.columns(2)
+
+    with col_pos1:
+        st.write(f"Blank 위치: {st.session_state.blank_point}")
+
+    with col_pos2:
+        st.write(f"Sample 위치: {st.session_state.sample_point}")
+
+    if st.session_state.blank_point is not None and st.session_state.sample_point is not None:
+        if st.button("위치 확정 및 분석"):
+            blank_x_disp, blank_y_disp = st.session_state.blank_point
+            sample_x_disp, sample_y_disp = st.session_state.sample_point
+
+            blank_x = blank_x_disp / scale
+            blank_y = blank_y_disp / scale
+            sample_x = sample_x_disp / scale
+            sample_y = sample_y_disp / scale
 
             roi_size_orig = max(1, int(roi_size_display / scale))
 
@@ -404,7 +419,7 @@ if image_file is not None:
                 columns=FEATURES
             )
 
-            st.subheader("2. 추출된 RGB")
+            st.subheader("3. 추출된 RGB")
 
             col1, col2 = st.columns(2)
 
@@ -426,7 +441,7 @@ if image_file is not None:
                     "사용 픽셀 비율": f"{sample_kept * 100:.1f}%"
                 })
 
-            st.subheader("3. 예측 결과")
+            st.subheader("4. 예측 결과")
 
             if delta_e < no_metal_threshold:
                 st.warning("예상 결과: 중금속 미검출 또는 반응 미약")
@@ -442,7 +457,7 @@ if image_file is not None:
                     "ΔE": round(float(delta_e), 3),
                 })
 
-                st.session_state["last_result"] = {
+                st.session_state.last_result = {
                     "is_no_metal": True,
                     "blank_R": float(blank_rgb[0]),
                     "blank_G": float(blank_rgb[1]),
@@ -503,7 +518,7 @@ if image_file is not None:
                     for idx in ppm_top_idx:
                         st.write(f"{int(ppm_classes[idx])} ppm: {ppm_proba[idx] * 100:.1f}%")
 
-                st.session_state["last_result"] = {
+                st.session_state.last_result = {
                     "is_no_metal": False,
                     "blank_R": float(blank_rgb[0]),
                     "blank_G": float(blank_rgb[1]),
@@ -520,20 +535,22 @@ if image_file is not None:
                     "predicted_ppm": ppm_pred,
                 }
 
+    else:
+        st.info("Blank 점과 Sample 점을 각각 선택해야 분석할 수 있습니다.")
+
 else:
     st.info("사진을 업로드하거나 카메라로 촬영하세요.")
 
 
-if "last_result" in st.session_state:
-    st.subheader("4. 검증된 데이터 추가 저장")
+if st.session_state.last_result is not None:
+    st.subheader("5. 검증된 데이터 추가 저장")
 
     st.warning(
         "앱 예측값을 그대로 정답으로 저장하면 오류가 누적될 수 있습니다. "
         "정밀검사 또는 표준시료로 실제 정답을 확인한 경우에만 추가하세요."
     )
 
-    result = st.session_state["last_result"]
-
+    result = st.session_state.last_result
     group_options = list(group_classes) + ["No_Metal_or_Below_Threshold"]
 
     if result["predicted_group"] in group_options:
@@ -549,7 +566,6 @@ if "last_result" in st.session_state:
         )
 
         actual_metal = st.text_input("실제 Metal 선택사항", value="")
-
         default_ppm = int(result["predicted_ppm"]) if result["predicted_ppm"] is not None else 0
 
         actual_ppm = st.number_input(
