@@ -1,620 +1,565 @@
-import os
-import io
-import hashlib
-
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import streamlit as st
 from PIL import Image, ImageDraw
-from skimage.color import rgb2lab
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 
-# =========================================================
-# 기본 설정
-# =========================================================
-st.set_page_config(page_title="중금속 이미지 색센싱 웹앱", layout="wide")
+st.set_page_config(
+    page_title="색상 기반 중금속 판별",
+    layout="wide"
+)
 
-DATA_PATH = "training_data.csv"
-AUG_PATH = "training_data_augmented.csv"
-FEATURES = ["L", "a", "b", "deltaE"]
+CSV_PATH_CANDIDATES = [
+    "aunp_dtz_0_40ppm_dataset.csv",
+    "training_data.csv",
+]
 
+PPM_MIN = 0
+PPM_MAX = 40
 
-# =========================================================
-# 데이터 로드
-# =========================================================
-@st.cache_data
-def load_training_data():
-    if not os.path.exists(DATA_PATH):
-        st.error("training_data.csv 파일이 app.py와 같은 폴더에 없습니다.")
-        st.stop()
-
-    df = pd.read_csv(DATA_PATH)
-
-    # 열 이름 보정
-    if "dE" in df.columns and "deltaE" not in df.columns:
-        df = df.rename(columns={"dE": "deltaE"})
-
-    required_cols = ["Group", "ppm"] + FEATURES
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        st.error(f"CSV에 필요한 열이 없습니다: {missing}")
-        st.stop()
-
-    # 수치형 변환
-    for c in FEATURES + ["ppm"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # 그룹 정리
-    df["Group"] = df["Group"].astype(str).str.strip()
-    df = df[~df["Group"].isin(["", "nan", "None"])]
-
-    # 학습에 필요한 값만
-    df = df.dropna(subset=["Group", "ppm"] + FEATURES)
-
-    # 0ppm 제거
-    df = df[df["ppm"] > 0].copy()
-
-    # 검증 저장 데이터가 있으면 합치기
-    if os.path.exists(AUG_PATH):
-        aug = pd.read_csv(AUG_PATH)
-
-        if "dE" in aug.columns and "deltaE" not in aug.columns:
-            aug = aug.rename(columns={"dE": "deltaE"})
-
-        for c in FEATURES + ["ppm"]:
-            if c in aug.columns:
-                aug[c] = pd.to_numeric(aug[c], errors="coerce")
-
-        if "Group" in aug.columns:
-            aug["Group"] = aug["Group"].astype(str).str.strip()
-            aug = aug[~aug["Group"].isin(["", "nan", "None"])]
-            aug = aug.dropna(subset=["Group", "ppm"] + FEATURES)
-            aug = aug[aug["ppm"] > 0].copy()
-
-            df = pd.concat([df, aug], ignore_index=True)
-
-    return df
+METAL_K = 4
+PPM_K = 3
 
 
-# =========================================================
-# 모델 생성
-# =========================================================
-@st.cache_resource
-def build_group_model(df):
-    X = df[FEATURES]
-    y = df["Group"]
+METAL_COL_CANDIDATES = [
+    "heavy metal",
+    "Heavy Metal",
+    "Metal",
+    "metal",
+    "중금속",
+    "금속",
+    "Group",
+    "group",
+]
 
-    model = make_pipeline(
-        StandardScaler(),
-        KNeighborsClassifier(
-            n_neighbors=4,
-            metric="euclidean",
-            weights="distance"
-        )
-    )
-    model.fit(X, y)
-    return model
+PPM_COL_CANDIDATES = [
+    "ppm",
+    "PPM",
+    "농도",
+    "concentration",
+    "Concentration",
+]
 
+FEATURE_CANDIDATES = {
+    "L": ["L", "L*", "Lab_L", "sample_L"],
+    "a": ["a", "a*", "Lab_a", "sample_a"],
+    "b": ["b", "b*", "Lab_b", "sample_b"],
 
-def build_ppm_model(group_df, n_neighbors=3):
-    k = min(n_neighbors, len(group_df))
-    model = make_pipeline(
-        StandardScaler(),
-        KNeighborsClassifier(
-            n_neighbors=k,
-            metric="euclidean",
-            weights="distance"
-        )
-    )
-    X = group_df[FEATURES]
-    y = group_df["ppm"].astype(int)
-    model.fit(X, y)
-    return model
+    "deltaL": ["deltaL", "DeltaL", "delta_L", "Delta_L", "dL", "DL", "ΔL", "ΔL*"],
+    "deltaa": ["deltaa", "Deltaa", "deltaA", "DeltaA", "delta_a", "Delta_a", "da", "DA", "Δa", "Δa*"],
+    "deltab": ["deltab", "Deltab", "deltaB", "DeltaB", "delta_b", "Delta_b", "db", "DB", "Δb", "Δb*"],
+    "deltaE": ["deltaE", "DeltaE", "delta_E", "Delta_E", "dE", "DE", "ED", "ΔE"],
+}
 
 
-# =========================================================
-# 색 계산 함수
-# =========================================================
+def srgb_to_linear(c):
+    c = c / 255.0
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def rgb_to_xyz(rgb):
+    r, g, b = srgb_to_linear(np.array(rgb, dtype=float))
+
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+
+    return np.array([x, y, z]) * 100
+
+
+def xyz_to_lab(xyz):
+    x, y, z = xyz
+
+    xn, yn, zn = 95.047, 100.000, 108.883
+    x, y, z = x / xn, y / yn, z / zn
+
+    def f(t):
+        return np.where(t > 0.008856, t ** (1 / 3), 7.787 * t + 16 / 116)
+
+    fx, fy, fz = f(x), f(y), f(z)
+
+    L = 116 * fy - 16
+    a = 500 * (fx - fy)
+    b = 200 * (fy - fz)
+
+    return np.array([L, a, b], dtype=float)
+
+
 def rgb_to_lab(rgb):
-    arr = np.array(rgb, dtype=np.float32).reshape(1, 1, 3) / 255.0
-    lab = rgb2lab(arr)[0, 0]
-    return lab
+    return xyz_to_lab(rgb_to_xyz(rgb))
 
 
-def delta_e(lab1, lab2):
-    return float(np.sqrt(np.sum((lab1 - lab2) ** 2)))
+def mean_rgb_in_circle(image, center, radius):
+    img = image.convert("RGB")
+    arr = np.array(img)
 
-
-def robust_rgb_from_circle(image, x, y, radius, keep_percent=65):
-    """
-    선택한 점 중심의 원형 ROI 내부 픽셀을 사용.
-    반사광/그림자/배경 영향을 줄이기 위해 튀는 픽셀 일부 제거.
-    """
-    arr = np.array(image).astype(np.float32)
+    x0, y0 = center
     h, w, _ = arr.shape
 
-    x = int(round(x))
-    y = int(round(y))
-    radius = max(2, int(round(radius)))
+    yy, xx = np.ogrid[:h, :w]
+    mask = (xx - x0) ** 2 + (yy - y0) ** 2 <= radius ** 2
 
-    x1 = max(0, x - radius)
-    x2 = min(w, x + radius + 1)
-    y1 = max(0, y - radius)
-    y2 = min(h, y + radius + 1)
+    if mask.sum() == 0:
+        raise ValueError("선택 영역이 너무 작습니다.")
 
-    crop = arr[y1:y2, x1:x2, :]
-    if crop.size == 0:
-        return np.array([0, 0, 0], dtype=np.float32), 0.0
-
-    yy, xx = np.mgrid[y1:y2, x1:x2]
-    dist = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
-    mask_circle = dist <= radius
-
-    pixels = crop[mask_circle]
-    if len(pixels) == 0:
-        return np.array([0, 0, 0], dtype=np.float32), 0.0
-
-    # 중심부 패치 기준색
-    center_r = max(2, radius // 3)
-    mask_center = dist <= center_r
-    center_pixels = crop[mask_center]
-
-    if len(center_pixels) == 0:
-        ref_rgb = np.median(pixels, axis=0)
-    else:
-        ref_rgb = np.median(center_pixels, axis=0)
-
-    brightness = pixels.mean(axis=1)
-    low_b, high_b = np.percentile(brightness, [2, 98])
-    brightness_mask = (brightness >= low_b) & (brightness <= high_b)
-
-    color_dist = np.linalg.norm(pixels - ref_rgb, axis=1)
-
-    if brightness_mask.sum() >= 10:
-        valid_d = color_dist[brightness_mask]
-    else:
-        valid_d = color_dist
-
-    if len(valid_d) >= 10:
-        threshold = np.percentile(valid_d, keep_percent)
-        final_mask = brightness_mask & (color_dist <= threshold)
-        if final_mask.sum() < 10:
-            final_mask = brightness_mask
-    else:
-        final_mask = brightness_mask if brightness_mask.sum() > 0 else np.ones(len(pixels), dtype=bool)
-
-    selected = pixels[final_mask]
-    if len(selected) == 0:
-        selected = pixels
-
-    robust_rgb = np.median(selected, axis=0)
-    kept_ratio = len(selected) / len(pixels)
-
-    return robust_rgb, kept_ratio
+    return arr[mask].mean(axis=0)
 
 
-# =========================================================
-# 미리보기 그리기
-# =========================================================
-def draw_circle_preview(display_image, blank_orig, sample_orig, scale, radius_disp):
-    img = display_image.copy()
+def draw_points(image, blank_xy=None, sample_xy=None, radius=12):
+    img = image.convert("RGB").copy()
     draw = ImageDraw.Draw(img)
 
-    def draw_one(orig_point, color, label):
-        if orig_point is None:
-            return
-        x_disp = int(round(orig_point[0] * scale))
-        y_disp = int(round(orig_point[1] * scale))
-
-        r = int(radius_disp)
-
-        # 원만 그리기
+    if blank_xy is not None:
+        x, y = blank_xy
         draw.ellipse(
-            (x_disp - r, y_disp - r, x_disp + r, y_disp + r),
-            outline=color,
-            width=4
+            [x - radius, y - radius, x + radius, y + radius],
+            outline="blue",
+            width=4,
         )
-        draw.ellipse(
-            (x_disp - 4, y_disp - 4, x_disp + 4, y_disp + 4),
-            fill=color
-        )
-        draw.text((x_disp + r + 4, y_disp + 2), label, fill=color)
+        draw.text((x + radius + 5, y - radius), "Blank", fill="blue")
 
-    draw_one(blank_orig, "blue", "Blank")
-    draw_one(sample_orig, "red", "Sample")
+    if sample_xy is not None:
+        x, y = sample_xy
+        draw.ellipse(
+            [x - radius, y - radius, x + radius, y + radius],
+            outline="red",
+            width=4,
+        )
+        draw.text((x + radius + 5, y - radius), "Sample", fill="red")
 
     return img
 
 
-# =========================================================
-# 세션 상태 초기화
-# =========================================================
-if "blank_point_orig" not in st.session_state:
-    st.session_state.blank_point_orig = None
+def load_raw_image(uploaded_file):
+    raw_bytes = uploaded_file.getvalue()
 
-if "sample_point_orig" not in st.session_state:
-    st.session_state.sample_point_orig = None
+    st.info(".raw 파일은 크기 정보가 없어서 가로, 세로, 채널 값을 맞춰야 합니다.")
 
-if "selection_mode" not in st.session_state:
-    st.session_state.selection_mode = "blank"
+    col1, col2, col3, col4 = st.columns(4)
 
-if "analysis_result" not in st.session_state:
-    st.session_state.analysis_result = None
+    with col1:
+        width = st.number_input("가로(px)", min_value=1, value=640, step=1)
 
-if "image_hash" not in st.session_state:
-    st.session_state.image_hash = None
+    with col2:
+        height = st.number_input("세로(px)", min_value=1, value=480, step=1)
 
+    with col3:
+        channels = st.selectbox("채널", [3, 1, 4], index=0)
 
-# =========================================================
-# 메인 로직
-# =========================================================
-df = load_training_data()
-group_model = build_group_model(df)
-group_knn = group_model.named_steps["kneighborsclassifier"]
-group_classes = group_knn.classes_
+    with col4:
+        bit_depth = st.selectbox("비트", ["8-bit", "16-bit"], index=0)
 
-st.title("중금속 이미지 색센싱 웹앱")
-st.caption("CIE Lab 기반 distance-weighted kNN 분류")
+    dtype = np.uint8 if bit_depth == "8-bit" else np.dtype("<u2")
+    arr = np.frombuffer(raw_bytes, dtype=dtype)
 
-left_col, main_col = st.columns([1, 3], gap="large")
+    expected_size = int(width * height * channels)
 
-with left_col:
-    st.markdown("### Model Setting")
-    st.write("**Features:** L*, a*, b*, ΔE")
-    st.write("**1차 분류:** kNN 8 Group")
-    st.write("**2차 분류:** 예측 Group 내 ppm 분류")
-    st.write("**k (Group):** 4")
-    st.write("**k (ppm):** 3")
-    st.write("**Metric:** Euclidean")
-    st.write("**Weight:** By Distance")
-    st.write(f"**Training samples:** {len(df)}")
-
-    st.markdown("---")
-
-    display_width = st.slider(
-        "표시 이미지 너비(px)",
-        min_value=280,
-        max_value=1000,
-        value=700,
-        step=20
-    )
-
-    no_metal_threshold = st.slider(
-        "No Metal 판단 ΔE 기준",
-        min_value=0.0,
-        max_value=30.0,
-        value=8.0,
-        step=0.5
-    )
-
-    keep_percent = st.slider(
-        "노이즈 제거 강도",
-        min_value=40,
-        max_value=90,
-        value=65,
-        step=5
-    )
-
-with main_col:
-    st.subheader("1. 이미지 입력")
-
-    input_method = st.radio(
-        "이미지 입력 방식",
-        ["사진 업로드", "카메라 촬영"],
-        horizontal=True
-    )
-
-    uploaded_file = None
-    if input_method == "사진 업로드":
-        uploaded_file = st.file_uploader("키트 이미지를 업로드하세요", type=["jpg", "jpeg", "png"])
-    else:
-        uploaded_file = st.camera_input("키트를 촬영하세요")
-
-    if uploaded_file is None:
-        st.info("사진을 업로드하거나 카메라로 촬영하세요.")
+    if arr.size < expected_size:
+        st.error(
+            f"RAW 설정이 맞지 않습니다. 현재 데이터 수: {arr.size}, 필요 데이터 수: {expected_size}"
+        )
         st.stop()
 
-    image_bytes = uploaded_file.getvalue()
-    current_hash = hashlib.md5(image_bytes).hexdigest()
+    if arr.size > expected_size:
+        arr = arr[:expected_size]
 
-    if st.session_state.image_hash != current_hash:
-        st.session_state.image_hash = current_hash
-        st.session_state.blank_point_orig = None
-        st.session_state.sample_point_orig = None
-        st.session_state.analysis_result = None
+    arr = arr.reshape((int(height), int(width), int(channels)))
 
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    orig_w, orig_h = image.size
+    if bit_depth == "16-bit":
+        arr = (arr / 257).clip(0, 255).astype(np.uint8)
 
-    disp_w = min(display_width, orig_w)
-    scale = disp_w / orig_w
-    disp_h = int(orig_h * scale)
+    if channels == 1:
+        arr = np.repeat(arr, 3, axis=2)
 
-    display_image = image.resize((disp_w, disp_h))
+    if channels == 4:
+        arr = arr[:, :, :3]
 
-    st.write(f"원본 이미지 크기: {orig_w} × {orig_h}")
+    return Image.fromarray(arr.astype(np.uint8), mode="RGB")
 
-    roi_radius_disp = st.slider(
-        "점 주변 RGB 평균 영역 크기(화면 표시 기준 px)",
-        min_value=6,
-        max_value=80,
-        value=24,
-        step=2
+
+def load_uploaded_image(uploaded_file):
+    filename = uploaded_file.name.lower()
+
+    if filename.endswith(".raw"):
+        return load_raw_image(uploaded_file)
+
+    return Image.open(uploaded_file).convert("RGB")
+
+
+@st.cache_data
+def load_training_data():
+    last_error = None
+
+    for path in CSV_PATH_CANDIDATES:
+        try:
+            try:
+                df = pd.read_csv(path, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                df = pd.read_csv(path, encoding="cp949")
+
+            df.columns = [str(c).strip() for c in df.columns]
+            return df, path
+
+        except Exception as e:
+            last_error = e
+
+    raise FileNotFoundError(
+        f"CSV 파일을 찾지 못했습니다. 가능한 파일명: {CSV_PATH_CANDIDATES}. 마지막 오류: {last_error}"
     )
 
-    st.subheader("2. ROI 점 선택")
 
-    btn1, btn2, btn3 = st.columns([1, 1, 1])
+def find_column(df, candidates):
+    for cand in candidates:
+        if cand in df.columns:
+            return cand
 
-    with btn1:
-        if st.button("Blank 선택", use_container_width=True):
-            st.session_state.selection_mode = "blank"
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
 
-    with btn2:
-        if st.button("Sample 선택", use_container_width=True):
-            st.session_state.selection_mode = "sample"
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in lower_map:
+            return lower_map[key]
 
-    with btn3:
-        if st.button("ROI 초기화", use_container_width=True):
-            st.session_state.blank_point_orig = None
-            st.session_state.sample_point_orig = None
-            st.session_state.analysis_result = None
-            st.rerun()
+    return None
 
-    if st.session_state.selection_mode == "blank":
-        st.info("현재 모드: Blank 선택. 이미지에서 Blank 위치를 클릭하세요.")
+
+def resolve_feature_columns(df):
+    resolved = {}
+
+    for feature_name, candidates in FEATURE_CANDIDATES.items():
+        col = find_column(df, candidates)
+
+        if col is not None:
+            resolved[feature_name] = col
+
+    required = ["L", "a", "b", "deltaL", "deltaa", "deltab"]
+
+    missing = [name for name in required if name not in resolved]
+
+    if missing:
+        raise ValueError(
+            "CSV에서 필요한 피처 컬럼을 찾지 못했습니다: "
+            + ", ".join(missing)
+            + "\n현재 코드 기준 필요 컬럼: L, a, b, deltaL, deltaa, deltab, deltaE"
+        )
+
+    if "deltaE" not in resolved:
+        resolved["deltaE"] = None
+
+    return resolved
+
+
+def normalize_metal_name(value):
+    return str(value).strip()
+
+
+def is_ag(value):
+    v = str(value).strip().lower()
+    v = v.replace(" ", "").replace("+", "")
+    return v in ["ag", "silver", "은"]
+
+
+def format_ppm_label(value):
+    try:
+        num = float(value)
+        if num.is_integer():
+            return str(int(num))
+        return str(num)
+    except Exception:
+        return str(value)
+
+
+def make_feature_dict(blank_rgb, sample_rgb):
+    blank_lab = rgb_to_lab(blank_rgb)
+    sample_lab = rgb_to_lab(sample_rgb)
+
+    delta_l = sample_lab[0] - blank_lab[0]
+    delta_a = sample_lab[1] - blank_lab[1]
+    delta_b = sample_lab[2] - blank_lab[2]
+    delta_e = float(np.sqrt(delta_l ** 2 + delta_a ** 2 + delta_b ** 2))
+
+    feature_dict = {
+        "L": sample_lab[0],
+        "a": sample_lab[1],
+        "b": sample_lab[2],
+        "deltaL": delta_l,
+        "deltaa": delta_a,
+        "deltab": delta_b,
+        "deltaE": delta_e,
+    }
+
+    return feature_dict, blank_lab, sample_lab
+
+
+def prepare_training_data(df):
+    metal_col = find_column(df, METAL_COL_CANDIDATES)
+    ppm_col = find_column(df, PPM_COL_CANDIDATES)
+
+    if metal_col is None:
+        raise ValueError("CSV에서 중금속 컬럼을 찾지 못했습니다. heavy metal 또는 Metal 컬럼이 필요합니다.")
+
+    if ppm_col is None:
+        raise ValueError("CSV에서 ppm 컬럼을 찾지 못했습니다.")
+
+    feature_map = resolve_feature_columns(df)
+
+    work = df.copy()
+
+    work[metal_col] = work[metal_col].apply(normalize_metal_name)
+    work[ppm_col] = pd.to_numeric(work[ppm_col], errors="coerce")
+
+    for feature_name, col in feature_map.items():
+        if col is not None:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    work = work[~work[metal_col].apply(is_ag)]
+    work = work[work[ppm_col].between(PPM_MIN, PPM_MAX)]
+
+    if feature_map["deltaE"] is None:
+        work["__deltaE__"] = np.sqrt(
+            work[feature_map["deltaL"]] ** 2
+            + work[feature_map["deltaa"]] ** 2
+            + work[feature_map["deltab"]] ** 2
+        )
+        feature_map["deltaE"] = "__deltaE__"
+
+    feature_names = ["L", "a", "b", "deltaL", "deltaa", "deltab", "deltaE"]
+    feature_cols = [feature_map[name] for name in feature_names]
+
+    work = work.dropna(subset=[metal_col, ppm_col] + feature_cols)
+
+    if len(work) == 0:
+        raise ValueError("학습 가능한 데이터가 없습니다. Ag 제외 또는 ppm 0~40 조건을 확인해 주세요.")
+
+    metal_count = work[metal_col].nunique()
+
+    if metal_count != 9:
+        st.warning(f"Ag 제외 후 인식된 중금속 수가 {metal_count}종입니다. CSV의 중금속 이름을 확인해 주세요.")
+
+    return work, metal_col, ppm_col, feature_names, feature_cols
+
+
+def train_metal_model(work, metal_col, ppm_col, feature_cols):
+    metal_train = work[work[ppm_col] > 0].copy()
+
+    if metal_train[metal_col].nunique() < 2:
+        metal_train = work.copy()
+
+    x = metal_train[feature_cols].values
+    y = metal_train[metal_col].astype(str).values
+
+    k = min(METAL_K, len(metal_train))
+
+    model = make_pipeline(
+        StandardScaler(),
+        KNeighborsClassifier(
+            n_neighbors=k,
+            weights="distance",
+            metric="euclidean",
+        ),
+    )
+
+    model.fit(x, y)
+    return model
+
+
+def predict_ppm(work, metal_col, ppm_col, feature_cols, predicted_metal, x_input):
+    metal_rows = work[work[metal_col].astype(str) == str(predicted_metal)].copy()
+
+    if len(metal_rows) == 0:
+        return None
+
+    x = metal_rows[feature_cols].values
+    y = metal_rows[ppm_col].apply(format_ppm_label).values
+
+    k = min(PPM_K, len(metal_rows))
+
+    model = make_pipeline(
+        StandardScaler(),
+        KNeighborsClassifier(
+            n_neighbors=k,
+            weights="distance",
+            metric="euclidean",
+        ),
+    )
+
+    model.fit(x, y)
+    return model.predict(x_input)[0]
+
+
+st.title("색상으로 중금속 찾기")
+
+try:
+    raw_df, loaded_csv_path = load_training_data()
+    work, metal_col, ppm_col, feature_names, feature_cols = prepare_training_data(raw_df)
+    metal_model = train_metal_model(work, metal_col, ppm_col, feature_cols)
+except Exception as e:
+    st.error(f"학습 데이터 오류: {e}")
+    st.stop()
+
+
+if "blank_xy" not in st.session_state:
+    st.session_state.blank_xy = None
+
+if "sample_xy" not in st.session_state:
+    st.session_state.sample_xy = None
+
+
+input_method = st.radio(
+    "이미지 입력",
+    ["사진 업로드", "카메라 촬영"],
+    horizontal=True,
+)
+
+uploaded_file = None
+
+if input_method == "사진 업로드":
+    uploaded_file = st.file_uploader(
+        "이미지를 올려주세요",
+        type=["jpg", "jpeg", "png", "raw"],
+    )
+else:
+    uploaded_file = st.camera_input("촬영하기")
+
+
+if uploaded_file is None:
+    st.stop()
+
+
+try:
+    image = load_uploaded_image(uploaded_file)
+except Exception as e:
+    st.error(f"이미지를 불러오지 못했습니다: {e}")
+    st.stop()
+
+
+radius = st.slider(
+    "평균 색상 추출 영역",
+    min_value=4,
+    max_value=80,
+    value=12,
+    step=1,
+)
+
+select_target = st.radio(
+    "찍을 위치",
+    ["Blank", "Sample"],
+    horizontal=True,
+)
+
+display_image = draw_points(
+    image,
+    blank_xy=st.session_state.blank_xy,
+    sample_xy=st.session_state.sample_xy,
+    radius=radius,
+)
+
+clicked = streamlit_image_coordinates(
+    display_image,
+    key="image_click",
+)
+
+if clicked is not None:
+    x = int(clicked["x"])
+    y = int(clicked["y"])
+
+    if select_target == "Blank":
+        st.session_state.blank_xy = (x, y)
     else:
-        st.info("현재 모드: Sample 선택. 이미지에서 Sample 위치를 클릭하세요.")
+        st.session_state.sample_xy = (x, y)
 
-    preview = draw_circle_preview(
-        display_image=display_image,
-        blank_orig=st.session_state.blank_point_orig,
-        sample_orig=st.session_state.sample_point_orig,
-        scale=scale,
-        radius_disp=roi_radius_disp
-    )
+    st.rerun()
 
-    click = streamlit_image_coordinates(
-        preview,
-        key=f"coord_{st.session_state.image_hash}_{st.session_state.selection_mode}"
-    )
 
-    # 클릭 좌표 저장
-    if click is not None and ("x" in click) and ("y" in click):
-        x_disp = int(click["x"])
-        y_disp = int(click["y"])
+col1, col2 = st.columns(2)
 
-        x_orig = int(round(x_disp / scale))
-        y_orig = int(round(y_disp / scale))
+with col1:
+    st.write("Blank:", st.session_state.blank_xy)
 
-        # 이미지 범위 보정
-        x_orig = max(0, min(orig_w - 1, x_orig))
-        y_orig = max(0, min(orig_h - 1, y_orig))
+with col2:
+    st.write("Sample:", st.session_state.sample_xy)
 
-        if st.session_state.selection_mode == "blank":
-            if st.session_state.blank_point_orig != (x_orig, y_orig):
-                st.session_state.blank_point_orig = (x_orig, y_orig)
-                st.session_state.analysis_result = None
-                st.rerun()
 
-        elif st.session_state.selection_mode == "sample":
-            if st.session_state.sample_point_orig != (x_orig, y_orig):
-                st.session_state.sample_point_orig = (x_orig, y_orig)
-                st.session_state.analysis_result = None
-                st.rerun()
+can_analyze = (
+    st.session_state.blank_xy is not None
+    and st.session_state.sample_xy is not None
+)
 
-    pos1, pos2 = st.columns(2)
-    with pos1:
-        st.write(f"Blank 위치: {st.session_state.blank_point_orig}")
-    with pos2:
-        st.write(f"Sample 위치: {st.session_state.sample_point_orig}")
+if st.button("판별하기", disabled=not can_analyze):
+    try:
+        blank_rgb = mean_rgb_in_circle(
+            image,
+            st.session_state.blank_xy,
+            radius,
+        )
 
-    if st.session_state.blank_point_orig is None or st.session_state.sample_point_orig is None:
-        st.info("Blank 점과 Sample 점을 각각 선택해야 분석할 수 있습니다.")
+        sample_rgb = mean_rgb_in_circle(
+            image,
+            st.session_state.sample_xy,
+            radius,
+        )
 
-    if st.button("위치 확정 및 분석 실행", type="primary", use_container_width=True):
-        if st.session_state.blank_point_orig is None or st.session_state.sample_point_orig is None:
-            st.warning("Blank와 Sample 위치를 먼저 모두 선택하세요.")
-        else:
-            blank_x, blank_y = st.session_state.blank_point_orig
-            sample_x, sample_y = st.session_state.sample_point_orig
+        feature_dict, blank_lab, sample_lab = make_feature_dict(
+            blank_rgb,
+            sample_rgb,
+        )
 
-            roi_radius_orig = max(2, int(round(roi_radius_disp / scale)))
+        x_input = np.array(
+            [feature_dict[name] for name in feature_names],
+            dtype=float,
+        ).reshape(1, -1)
 
-            blank_rgb, blank_kept = robust_rgb_from_circle(
-                image=image,
-                x=blank_x,
-                y=blank_y,
-                radius=roi_radius_orig,
-                keep_percent=keep_percent
-            )
+        predicted_metal = metal_model.predict(x_input)[0]
 
-            sample_rgb, sample_kept = robust_rgb_from_circle(
-                image=image,
-                x=sample_x,
-                y=sample_y,
-                radius=roi_radius_orig,
-                keep_percent=keep_percent
-            )
+        predicted_ppm = predict_ppm(
+            work,
+            metal_col,
+            ppm_col,
+            feature_cols,
+            predicted_metal,
+            x_input,
+        )
 
-            blank_lab = rgb_to_lab(blank_rgb)
-            sample_lab = rgb_to_lab(sample_rgb)
-            dE_val = delta_e(sample_lab, blank_lab)
+        result_col1, result_col2, result_col3 = st.columns(3)
 
-            input_df = pd.DataFrame(
-                [[sample_lab[0], sample_lab[1], sample_lab[2], dE_val]],
-                columns=FEATURES
-            )
+        with result_col1:
+            st.metric("중금속", predicted_metal)
 
-            result = {
-                "blank_rgb": blank_rgb,
-                "sample_rgb": sample_rgb,
-                "blank_lab": blank_lab,
-                "sample_lab": sample_lab,
-                "deltaE": dE_val,
-                "blank_kept": blank_kept,
-                "sample_kept": sample_kept,
+        with result_col2:
+            st.metric("농도", f"{predicted_ppm} ppm" if predicted_ppm is not None else "분류 불가")
+
+        with result_col3:
+            st.metric("deltaE", f"{feature_dict['deltaE']:.3f}")
+
+        if str(predicted_ppm) == "0":
+            st.info("0 ppm은 Blank에 가까운 상태라 중금속 종류 예측 신뢰도가 낮을 수 있습니다.")
+
+        feature_result = pd.DataFrame(
+            {
+                "Feature": feature_names,
+                "Value": [round(float(feature_dict[name]), 4) for name in feature_names],
             }
+        )
 
-            # No metal 판단
-            if dE_val < no_metal_threshold:
-                result["predicted_group"] = "No_Metal_or_Below_Threshold"
-                result["group_confidence"] = None
-                result["group_top"] = []
-                result["predicted_ppm"] = 0
-                result["ppm_top"] = []
-                result["is_no_metal"] = True
-            else:
-                group_pred = group_model.predict(input_df)[0]
-                group_proba = group_model.predict_proba(input_df)[0]
+        st.dataframe(feature_result, use_container_width=True)
 
-                top_idx = np.argsort(group_proba)[::-1][:3]
-                top_groups = [
-                    (group_classes[i], float(group_proba[i]))
-                    for i in top_idx
-                ]
+        rgb_lab_result = pd.DataFrame(
+            {
+                "구분": ["Blank", "Sample"],
+                "R": [round(float(blank_rgb[0]), 2), round(float(sample_rgb[0]), 2)],
+                "G": [round(float(blank_rgb[1]), 2), round(float(sample_rgb[1]), 2)],
+                "B": [round(float(blank_rgb[2]), 2), round(float(sample_rgb[2]), 2)],
+                "L": [round(float(blank_lab[0]), 3), round(float(sample_lab[0]), 3)],
+                "a": [round(float(blank_lab[1]), 3), round(float(sample_lab[1]), 3)],
+                "b": [round(float(blank_lab[2]), 3), round(float(sample_lab[2]), 3)],
+            }
+        )
 
-                predicted_group = top_groups[0][0]
-                predicted_conf = top_groups[0][1]
+        st.dataframe(rgb_lab_result, use_container_width=True)
 
-                group_df = df[df["Group"] == predicted_group].copy()
-
-                ppm_top = []
-                ppm_pred = None
-
-                if len(group_df) >= 1:
-                    ppm_model = build_ppm_model(group_df, n_neighbors=3)
-                    ppm_pred = int(ppm_model.predict(input_df)[0])
-
-                    ppm_knn = ppm_model.named_steps["kneighborsclassifier"]
-                    ppm_classes = ppm_knn.classes_
-                    ppm_proba = ppm_model.predict_proba(input_df)[0]
-
-                    ppm_idx = np.argsort(ppm_proba)[::-1][:3]
-                    ppm_top = [
-                        (int(ppm_classes[i]), float(ppm_proba[i]))
-                        for i in ppm_idx
-                    ]
-
-                result["predicted_group"] = predicted_group
-                result["group_confidence"] = predicted_conf
-                result["group_top"] = top_groups
-                result["predicted_ppm"] = ppm_pred
-                result["ppm_top"] = ppm_top
-                result["is_no_metal"] = False
-
-            st.session_state.analysis_result = result
-            st.rerun()
-
-    # =====================================================
-    # 결과 표시
-    # =====================================================
-    if st.session_state.analysis_result is not None:
-        res = st.session_state.analysis_result
-
-        st.subheader("3. 추출 RGB 결과")
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            st.markdown("#### Blank")
-            st.write({
-                "R": round(float(res["blank_rgb"][0]), 3),
-                "G": round(float(res["blank_rgb"][1]), 3),
-                "B": round(float(res["blank_rgb"][2]), 3),
-                "사용 픽셀 비율": f"{res['blank_kept'] * 100:.1f}%"
-            })
-
-        with c2:
-            st.markdown("#### Sample")
-            st.write({
-                "R": round(float(res["sample_rgb"][0]), 3),
-                "G": round(float(res["sample_rgb"][1]), 3),
-                "B": round(float(res["sample_rgb"][2]), 3),
-                "사용 픽셀 비율": f"{res['sample_kept'] * 100:.1f}%"
-            })
-
-        st.subheader("4. CIE Lab 계산값")
-
-        st.write({
-            "L*": round(float(res["sample_lab"][0]), 3),
-            "a*": round(float(res["sample_lab"][1]), 3),
-            "b*": round(float(res["sample_lab"][2]), 3),
-            "ΔE": round(float(res["deltaE"]), 3),
-        })
-
-        st.subheader("5. 예측 결과")
-
-        if res["is_no_metal"]:
-            st.warning("예상 결과: 중금속 미검출 또는 반응 미약")
-            st.write(f"ΔE = **{res['deltaE']:.2f}**, 설정 기준값 = **{no_metal_threshold:.2f}**")
-        else:
-            st.success(f"예상 중금속군: **{res['predicted_group']}**")
-
-            if res["group_confidence"] is not None:
-                st.write(f"예측 신뢰도: **{res['group_confidence'] * 100:.1f}%**")
-
-            if res["predicted_ppm"] is not None:
-                st.success(f"예상 농도: **{res['predicted_ppm']} ppm**")
-
-            if len(res["group_top"]) > 0:
-                st.markdown("#### 유사 중금속군 후보")
-                for g, p in res["group_top"]:
-                    st.write(f"- {g}: {p * 100:.1f}%")
-
-            if len(res["ppm_top"]) > 0:
-                st.markdown("#### 유사 농도 후보")
-                for ppm_val, p in res["ppm_top"]:
-                    st.write(f"- {ppm_val} ppm: {p * 100:.1f}%")
-
-        # =================================================
-        # 검증 데이터 저장
-        # =================================================
-        st.subheader("6. 검증 데이터 저장(선택)")
-
-        group_options = list(group_classes) + ["No_Metal_or_Below_Threshold"]
-        default_group = res["predicted_group"] if res["predicted_group"] in group_options else group_options[0]
-        default_ppm = int(res["predicted_ppm"]) if res["predicted_ppm"] is not None else 0
-
-        with st.form("save_verified_form"):
-            actual_group = st.selectbox(
-                "실제 Group (정밀검사 후 입력)",
-                options=group_options,
-                index=group_options.index(default_group)
-            )
-            actual_metal = st.text_input("실제 Metal (선택 입력)", value="")
-            actual_ppm = st.number_input(
-                "실제 ppm",
-                min_value=0,
-                max_value=10000,
-                value=default_ppm
-            )
-
-            save_btn = st.form_submit_button("검증 데이터 저장")
-
-            if save_btn:
-                save_row = {
-                    "Metal": actual_metal,
-                    "Group": actual_group,
-                    "ppm": actual_ppm,
-                    "L": float(res["sample_lab"][0]),
-                    "a": float(res["sample_lab"][1]),
-                    "b": float(res["sample_lab"][2]),
-                    "deltaE": float(res["deltaE"]),
-                }
-
-                save_df = pd.DataFrame([save_row])
-
-                if os.path.exists(AUG_PATH):
-                    old = pd.read_csv(AUG_PATH)
-                    new = pd.concat([old, save_df], ignore_index=True)
-                else:
-                    new = save_df
-
-                new.to_csv(AUG_PATH, index=False, encoding="utf-8-sig")
-                st.cache_data.clear()
-                st.success(f"{AUG_PATH} 파일에 저장했습니다.")
+    except Exception as e:
+        st.error(f"분석 중 오류가 발생했습니다: {e}")
