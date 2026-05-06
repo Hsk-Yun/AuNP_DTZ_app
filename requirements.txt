@@ -1,7 +1,8 @@
-streamlit==1.40.0
-streamlit-image-coordinates
+streamlit
 pandas
 numpy
-scikit-learn
-scikit-image
 pillow
+scikit-image
+scikit-learn
+streamlit-image-coordinates
+rawpy
