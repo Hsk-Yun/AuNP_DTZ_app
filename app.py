@@ -9,7 +9,7 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 
 st.set_page_config(
-    page_title="색상 기반 중금속 판별",
+    page_title="색으로 찾는 중금속",
     layout="wide"
 )
 
@@ -23,6 +23,8 @@ PPM_MAX = 40
 
 METAL_K = 4
 PPM_K = 3
+
+MAX_DISPLAY_WIDTH = 760
 
 
 METAL_COL_CANDIDATES = [
@@ -93,12 +95,49 @@ def rgb_to_lab(rgb):
     return xyz_to_lab(rgb_to_xyz(rgb))
 
 
+def resize_for_display(image, max_width=760):
+    original_width, original_height = image.size
+
+    if original_width <= max_width:
+        return image.copy(), 1.0
+
+    scale = max_width / original_width
+    display_height = int(original_height * scale)
+
+    display_image = image.resize(
+        (max_width, display_height),
+        Image.Resampling.LANCZOS
+    )
+
+    return display_image, scale
+
+
+def to_display_xy(original_xy, scale):
+    if original_xy is None:
+        return None
+
+    x, y = original_xy
+    return int(x * scale), int(y * scale)
+
+
+def to_original_xy(display_xy, scale):
+    x, y = display_xy
+
+    if scale == 0:
+        return x, y
+
+    return int(x / scale), int(y / scale)
+
+
 def mean_rgb_in_circle(image, center, radius):
     img = image.convert("RGB")
     arr = np.array(img)
 
     x0, y0 = center
     h, w, _ = arr.shape
+
+    x0 = max(0, min(w - 1, x0))
+    y0 = max(0, min(h - 1, y0))
 
     yy, xx = np.ogrid[:h, :w]
     mask = (xx - x0) ** 2 + (yy - y0) ** 2 <= radius ** 2
@@ -109,8 +148,8 @@ def mean_rgb_in_circle(image, center, radius):
     return arr[mask].mean(axis=0)
 
 
-def draw_points(image, blank_xy=None, sample_xy=None, radius=12):
-    img = image.convert("RGB").copy()
+def draw_points(display_image, blank_xy=None, sample_xy=None, radius=12):
+    img = display_image.convert("RGB").copy()
     draw = ImageDraw.Draw(img)
 
     if blank_xy is not None:
@@ -137,7 +176,7 @@ def draw_points(image, blank_xy=None, sample_xy=None, radius=12):
 def load_raw_image(uploaded_file):
     raw_bytes = uploaded_file.getvalue()
 
-    st.info(".raw 파일은 크기 정보가 없어서 가로, 세로, 채널 값을 맞춰야 합니다.")
+    st.info(".raw 파일은 크기 정보가 없어서 가로, 세로, 채널 값을 직접 맞춰야 합니다.")
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -190,7 +229,6 @@ def load_uploaded_image(uploaded_file):
     return Image.open(uploaded_file).convert("RGB")
 
 
-@st.cache_data
 def load_training_data():
     last_error = None
 
@@ -244,7 +282,7 @@ def resolve_feature_columns(df):
         raise ValueError(
             "CSV에서 필요한 피처 컬럼을 찾지 못했습니다: "
             + ", ".join(missing)
-            + "\n현재 코드 기준 필요 컬럼: L, a, b, deltaL, deltaa, deltab, deltaE"
+            + "\n필요 컬럼: L, a, b, deltaL, deltaa, deltab, deltaE"
         )
 
     if "deltaE" not in resolved:
@@ -391,7 +429,7 @@ def predict_ppm(work, metal_col, ppm_col, feature_cols, predicted_metal, x_input
     return model.predict(x_input)[0]
 
 
-st.title("색상으로 중금속 찾기")
+st.title("색으로 찾는 중금속")
 
 try:
     raw_df, loaded_csv_path = load_training_data()
@@ -409,11 +447,24 @@ if "sample_xy" not in st.session_state:
     st.session_state.sample_xy = None
 
 
-input_method = st.radio(
-    "이미지 입력",
-    ["사진 업로드", "카메라 촬영"],
-    horizontal=True,
-)
+top_col1, top_col2 = st.columns([1.2, 1])
+
+with top_col1:
+    input_method = st.radio(
+        "이미지 입력",
+        ["사진 업로드", "카메라 촬영"],
+        horizontal=True,
+    )
+
+with top_col2:
+    radius = st.slider(
+        "평균 색상 추출 영역",
+        min_value=4,
+        max_value=80,
+        value=12,
+        step=1,
+    )
+
 
 uploaded_file = None
 
@@ -437,59 +488,74 @@ except Exception as e:
     st.stop()
 
 
-radius = st.slider(
-    "평균 색상 추출 영역",
-    min_value=4,
-    max_value=80,
-    value=12,
-    step=1,
-)
+display_image, scale = resize_for_display(image, MAX_DISPLAY_WIDTH)
 
-select_target = st.radio(
-    "찍을 위치",
-    ["Blank", "Sample"],
-    horizontal=True,
-)
+display_blank_xy = to_display_xy(st.session_state.blank_xy, scale)
+display_sample_xy = to_display_xy(st.session_state.sample_xy, scale)
+display_radius = max(3, int(radius * scale))
 
-display_image = draw_points(
-    image,
-    blank_xy=st.session_state.blank_xy,
-    sample_xy=st.session_state.sample_xy,
-    radius=radius,
-)
+image_col, control_col = st.columns([2, 1])
 
-clicked = streamlit_image_coordinates(
-    display_image,
-    key="image_click",
-)
+with control_col:
+    select_target = st.radio(
+        "선택할 위치",
+        ["Blank", "Sample"],
+        horizontal=True,
+    )
+
+    st.write("Blank:", st.session_state.blank_xy)
+    st.write("Sample:", st.session_state.sample_xy)
+
+    can_analyze = (
+        st.session_state.blank_xy is not None
+        and st.session_state.sample_xy is not None
+    )
+
+    run_clicked = st.button(
+        "영역 확정 및 실행",
+        disabled=not can_analyze,
+        use_container_width=True,
+    )
+
+    reset_clicked = st.button(
+        "선택 초기화",
+        use_container_width=True,
+    )
+
+    if reset_clicked:
+        st.session_state.blank_xy = None
+        st.session_state.sample_xy = None
+        st.rerun()
+
+
+with image_col:
+    marked_image = draw_points(
+        display_image,
+        blank_xy=display_blank_xy,
+        sample_xy=display_sample_xy,
+        radius=display_radius,
+    )
+
+    clicked = streamlit_image_coordinates(
+        marked_image,
+        key="image_click",
+    )
+
 
 if clicked is not None:
-    x = int(clicked["x"])
-    y = int(clicked["y"])
+    display_x = int(clicked["x"])
+    display_y = int(clicked["y"])
+    original_x, original_y = to_original_xy((display_x, display_y), scale)
 
     if select_target == "Blank":
-        st.session_state.blank_xy = (x, y)
+        st.session_state.blank_xy = (original_x, original_y)
     else:
-        st.session_state.sample_xy = (x, y)
+        st.session_state.sample_xy = (original_x, original_y)
 
     st.rerun()
 
 
-col1, col2 = st.columns(2)
-
-with col1:
-    st.write("Blank:", st.session_state.blank_xy)
-
-with col2:
-    st.write("Sample:", st.session_state.sample_xy)
-
-
-can_analyze = (
-    st.session_state.blank_xy is not None
-    and st.session_state.sample_xy is not None
-)
-
-if st.button("판별하기", disabled=not can_analyze):
+if run_clicked:
     try:
         blank_rgb = mean_rgb_in_circle(
             image,
