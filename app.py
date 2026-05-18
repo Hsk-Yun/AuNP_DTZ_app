@@ -686,43 +686,34 @@ if st.session_state.analysis_result is not None:
         st.warning("중금속 미검출 또는 반응이 약합니다.")
         st.write(f"△E: {res['deltaE']:.2f}")
     else:
-        pred1, pred2, pred3 = st.columns(3)
+        pred1, pred2 = st.columns(2)
 
         with pred1:
-            st.success(f"1차 예상 중금속군: {res['predicted_group']}")
-            st.write(f"금속군 신뢰도: {res['group_confidence'] * 100:.1f}%")
+            st.success(f"예상 중금속: {res['predicted_metal']}")
+
+            if res.get("needs_metal_detail") and res.get("metal_confidence") is not None:
+                st.write(f"중금속 신뢰도: {res['metal_confidence'] * 100:.1f}%")
+            else:
+                st.write(f"중금속 신뢰도: {res['group_confidence'] * 100:.1f}%")
 
         with pred2:
-            st.success(f"최종 예상 중금속: {res['predicted_metal']}")
-            if res.get("needs_metal_detail") and res.get("metal_confidence") is not None:
-                st.write(f"세부 금속 신뢰도: {res['metal_confidence'] * 100:.1f}%")
-            elif res.get("needs_metal_detail"):
-                st.write("세부 금속 신뢰도: 계산 불가")
-            else:
-                st.write("세부 분류 불필요")
-
-        with pred3:
             st.success(f"예상 농도: {res['predicted_ppm']} ppm")
             if res["ppm_confidence"] is not None:
                 st.write(f"농도 신뢰도: {res['ppm_confidence'] * 100:.1f}%")
 
-        cand1, cand2, cand3 = st.columns(3)
+        cand1, cand2 = st.columns(2)
 
         with cand1:
-            st.markdown("#### 유사 중금속군 후보")
-            if len(res["group_top"]) > 0:
+            st.markdown("#### 유사 중금속 후보")
+
+            if res.get("needs_metal_detail") and len(res.get("metal_top", [])) > 0:
+                for m, p in res["metal_top"]:
+                    st.markdown(f"- {m}: {p * 100:.1f}%")
+            elif len(res["group_top"]) > 0:
                 for g, p in res["group_top"]:
                     st.markdown(f"- {g}: {p * 100:.1f}%")
 
         with cand2:
-            st.markdown("#### 세부 중금속 후보")
-            if res.get("needs_metal_detail") and len(res.get("metal_top", [])) > 0:
-                for m, p in res["metal_top"]:
-                    st.markdown(f"- {m}: {p * 100:.1f}%")
-            else:
-                st.markdown("- 해당 없음")
-
-        with cand3:
             st.markdown("#### 유사 농도 후보")
             if len(res["ppm_top"]) > 0:
                 for ppm_val, p in res["ppm_top"]:
