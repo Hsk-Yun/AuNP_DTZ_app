@@ -33,6 +33,12 @@ NO_METAL_THRESHOLD = 8.0
 KEEP_PERCENT = 65
 CONFIDENCE_WARNING_THRESHOLD = 0.50
 
+GROUP_K = 5
+METAL_K = 3
+PPM_K = 3
+
+GROUPED_LABELS = ["Ag-Zn", "Cd-Mn"]
+
 st.title("AD 전용 중금속 판독앱")
 
 
@@ -106,7 +112,7 @@ def load_training_data():
 
     df = df.rename(columns=rename_map)
 
-    required_cols = ["Group", "ppm"] + FEATURES
+    required_cols = ["Metal", "Group", "ppm"] + FEATURES
     missing = [c for c in required_cols if c not in df.columns]
 
     if missing:
@@ -116,24 +122,22 @@ def load_training_data():
     for c in FEATURES + ["ppm"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    df["Metal"] = df["Metal"].astype(str).str.strip()
     df["Group"] = df["Group"].astype(str).str.strip()
+
+    df = df[~df["Metal"].isin(["", "nan", "None"])]
     df = df[~df["Group"].isin(["", "nan", "None"])]
-
-    if "Metal" in df.columns:
-        df["Metal"] = df["Metal"].astype(str).str.strip()
-        df = df[~df["Metal"].str.lower().isin(["ag", "ag+", "silver", "은"])]
-
-    df = df[~df["Group"].str.lower().isin(["ag", "ag+", "silver", "은"])]
 
     df = df[df["ppm"].between(PPM_MIN, PPM_MAX)]
     df = df[df["ppm"] > 0].copy()
-    df = df.dropna(subset=["Group", "ppm"] + FEATURES)
+    df = df.dropna(subset=["Metal", "Group", "ppm"] + FEATURES)
 
     if os.path.exists(AUG_PATH):
         aug = pd.read_csv(AUG_PATH, encoding="utf-8-sig")
         aug.columns = [str(c).strip() for c in aug.columns]
 
         rename_aug = {}
+
         if "dE" in aug.columns and "deltaE" not in aug.columns:
             rename_aug["dE"] = "deltaE"
         if "DeltaE" in aug.columns and "deltaE" not in aug.columns:
@@ -149,21 +153,19 @@ def load_training_data():
 
         aug = aug.rename(columns=rename_aug)
 
-        if all(c in aug.columns for c in ["Group", "ppm"] + FEATURES):
+        if all(c in aug.columns for c in ["Metal", "Group", "ppm"] + FEATURES):
             for c in FEATURES + ["ppm"]:
                 aug[c] = pd.to_numeric(aug[c], errors="coerce")
 
+            aug["Metal"] = aug["Metal"].astype(str).str.strip()
             aug["Group"] = aug["Group"].astype(str).str.strip()
+
+            aug = aug[~aug["Metal"].isin(["", "nan", "None"])]
             aug = aug[~aug["Group"].isin(["", "nan", "None"])]
 
-            if "Metal" in aug.columns:
-                aug["Metal"] = aug["Metal"].astype(str).str.strip()
-                aug = aug[~aug["Metal"].str.lower().isin(["ag", "ag+", "silver", "은"])]
-
-            aug = aug[~aug["Group"].str.lower().isin(["ag", "ag+", "silver", "은"])]
             aug = aug[aug["ppm"].between(PPM_MIN, PPM_MAX)]
             aug = aug[aug["ppm"] > 0].copy()
-            aug = aug.dropna(subset=["Group", "ppm"] + FEATURES)
+            aug = aug.dropna(subset=["Metal", "Group", "ppm"] + FEATURES)
 
             df = pd.concat([df, aug], ignore_index=True)
 
@@ -178,10 +180,12 @@ def build_group_model(df):
     X = df[FEATURES]
     y = df["Group"]
 
+    k = min(GROUP_K, len(df))
+
     model = make_pipeline(
         StandardScaler(),
         KNeighborsClassifier(
-            n_neighbors=4,
+            n_neighbors=k,
             metric="euclidean",
             weights="distance"
         )
@@ -190,8 +194,9 @@ def build_group_model(df):
     return model
 
 
-def build_ppm_model(group_df, n_neighbors=3):
+def build_metal_model(group_df, n_neighbors=METAL_K):
     k = min(n_neighbors, len(group_df))
+
     model = make_pipeline(
         StandardScaler(),
         KNeighborsClassifier(
@@ -202,7 +207,25 @@ def build_ppm_model(group_df, n_neighbors=3):
     )
 
     X = group_df[FEATURES]
-    y = group_df["ppm"].astype(int)
+    y = group_df["Metal"]
+    model.fit(X, y)
+    return model
+
+
+def build_ppm_model(metal_df, n_neighbors=PPM_K):
+    k = min(n_neighbors, len(metal_df))
+
+    model = make_pipeline(
+        StandardScaler(),
+        KNeighborsClassifier(
+            n_neighbors=k,
+            metric="euclidean",
+            weights="distance"
+        )
+    )
+
+    X = metal_df[FEATURES]
+    y = metal_df["ppm"].astype(int)
     model.fit(X, y)
     return model
 
@@ -526,12 +549,19 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
             result["predicted_group"] = "No_Metal_or_Below_Threshold"
             result["group_confidence"] = None
             result["group_top"] = []
+            result["predicted_metal"] = None
+            result["metal_confidence"] = None
+            result["metal_top"] = []
+            result["needs_metal_detail"] = False
             result["predicted_ppm"] = 0
             result["ppm_confidence"] = None
             result["ppm_top"] = []
             result["is_no_metal"] = True
 
         else:
+            # =================================================
+            # 1차: Group 기준 중금속군 분류
+            # =================================================
             group_pred = group_model.predict(input_df)[0]
             group_proba = group_model.predict_proba(input_df)[0]
 
@@ -543,12 +573,46 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
 
             group_df = df[df["Group"] == predicted_group].copy()
 
+            # =================================================
+            # 2차: Ag-Zn, Cd-Mn처럼 그룹화된 경우만
+            # heavy metal 기준 세부 중금속 분류
+            # =================================================
+            predicted_metal = predicted_group
+            metal_conf = None
+            metal_top = []
+            needs_metal_detail = predicted_group in GROUPED_LABELS
+
+            if needs_metal_detail and len(group_df) >= 2 and group_df["Metal"].nunique() >= 2:
+                metal_model = build_metal_model(group_df, n_neighbors=METAL_K)
+                metal_pred = metal_model.predict(input_df)[0]
+
+                metal_knn = metal_model.named_steps["kneighborsclassifier"]
+                metal_classes = metal_knn.classes_
+                metal_proba = metal_model.predict_proba(input_df)[0]
+
+                metal_idx = np.argsort(metal_proba)[::-1][:2]
+                metal_top = [(metal_classes[i], float(metal_proba[i])) for i in metal_idx]
+
+                predicted_metal = metal_top[0][0]
+                metal_conf = metal_top[0][1]
+
+            elif not needs_metal_detail:
+                predicted_metal = predicted_group
+
+            # =================================================
+            # 3차: 최종 예측 중금속 기준 농도 분류
+            # =================================================
             ppm_top = []
             ppm_pred = None
             ppm_conf = None
 
-            if len(group_df) >= 1:
-                ppm_model = build_ppm_model(group_df, n_neighbors=3)
+            metal_df = df[df["Metal"] == predicted_metal].copy()
+
+            if len(metal_df) < 1:
+                metal_df = group_df.copy()
+
+            if len(metal_df) >= 1:
+                ppm_model = build_ppm_model(metal_df, n_neighbors=PPM_K)
                 ppm_pred = int(ppm_model.predict(input_df)[0])
 
                 ppm_knn = ppm_model.named_steps["kneighborsclassifier"]
@@ -564,6 +628,10 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
             result["predicted_group"] = predicted_group
             result["group_confidence"] = predicted_conf
             result["group_top"] = top_groups
+            result["predicted_metal"] = predicted_metal
+            result["metal_confidence"] = metal_conf
+            result["metal_top"] = metal_top
+            result["needs_metal_detail"] = needs_metal_detail
             result["predicted_ppm"] = ppm_pred
             result["ppm_confidence"] = ppm_conf
             result["ppm_top"] = ppm_top
@@ -618,18 +686,27 @@ if st.session_state.analysis_result is not None:
         st.warning("중금속 미검출 또는 반응이 약합니다.")
         st.write(f"△E: {res['deltaE']:.2f}")
     else:
-        pred1, pred2 = st.columns(2)
+        pred1, pred2, pred3 = st.columns(3)
 
         with pred1:
-            st.success(f"예상 중금속군: {res['predicted_group']}")
-            st.write(f"중금속 신뢰도: {res['group_confidence'] * 100:.1f}%")
+            st.success(f"1차 예상 중금속군: {res['predicted_group']}")
+            st.write(f"금속군 신뢰도: {res['group_confidence'] * 100:.1f}%")
 
         with pred2:
+            st.success(f"최종 예상 중금속: {res['predicted_metal']}")
+            if res.get("needs_metal_detail") and res.get("metal_confidence") is not None:
+                st.write(f"세부 금속 신뢰도: {res['metal_confidence'] * 100:.1f}%")
+            elif res.get("needs_metal_detail"):
+                st.write("세부 금속 신뢰도: 계산 불가")
+            else:
+                st.write("세부 분류 불필요")
+
+        with pred3:
             st.success(f"예상 농도: {res['predicted_ppm']} ppm")
             if res["ppm_confidence"] is not None:
                 st.write(f"농도 신뢰도: {res['ppm_confidence'] * 100:.1f}%")
 
-        cand1, cand2 = st.columns(2)
+        cand1, cand2, cand3 = st.columns(3)
 
         with cand1:
             st.markdown("#### 유사 중금속군 후보")
@@ -638,6 +715,14 @@ if st.session_state.analysis_result is not None:
                     st.markdown(f"- {g}: {p * 100:.1f}%")
 
         with cand2:
+            st.markdown("#### 세부 중금속 후보")
+            if res.get("needs_metal_detail") and len(res.get("metal_top", [])) > 0:
+                for m, p in res["metal_top"]:
+                    st.markdown(f"- {m}: {p * 100:.1f}%")
+            else:
+                st.markdown("- 해당 없음")
+
+        with cand3:
             st.markdown("#### 유사 농도 후보")
             if len(res["ppm_top"]) > 0:
                 for ppm_val, p in res["ppm_top"]:
