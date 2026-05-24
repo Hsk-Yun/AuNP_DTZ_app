@@ -311,7 +311,7 @@ def robust_rgb_from_circle(image, x, y, radius, keep_percent=65):
 # =========================================================
 # 미리보기 이미지에 원 그리기
 # =========================================================
-def draw_circle_preview(display_image, blank_orig, sample_orig, scale, radius_disp):
+def draw_circle_preview(display_image, blank_orig, sample_orig_list, scale, radius_disp):
     img = display_image.copy()
     draw = ImageDraw.Draw(img)
 
@@ -335,7 +335,9 @@ def draw_circle_preview(display_image, blank_orig, sample_orig, scale, radius_di
         draw.text((x_disp + r + 4, y_disp + 2), label, fill=color)
 
     draw_one(blank_orig, "blue", "Blank")
-    draw_one(sample_orig, "red", "Sample")
+
+    for idx, sample_orig in enumerate(sample_orig_list, start=1):
+        draw_one(sample_orig, "red", f"Sample {idx}")
 
     return img
 
@@ -355,8 +357,8 @@ group_classes = group_knn.classes_
 if "blank_point_orig" not in st.session_state:
     st.session_state.blank_point_orig = None
 
-if "sample_point_orig" not in st.session_state:
-    st.session_state.sample_point_orig = None
+if "sample_points_orig" not in st.session_state:
+    st.session_state.sample_points_orig = []
 
 if "selection_mode" not in st.session_state:
     st.session_state.selection_mode = "blank"
@@ -401,7 +403,7 @@ current_hash = hashlib.md5(image_bytes).hexdigest()
 if st.session_state.image_hash != current_hash:
     st.session_state.image_hash = current_hash
     st.session_state.blank_point_orig = None
-    st.session_state.sample_point_orig = None
+    st.session_state.sample_points_orig = []
     st.session_state.analysis_result = None
 
 orig_w, orig_h = image.size
@@ -432,7 +434,7 @@ with btn2:
 with btn3:
     if st.button("영역 초기화", use_container_width=True):
         st.session_state.blank_point_orig = None
-        st.session_state.sample_point_orig = None
+        st.session_state.sample_points_orig = []
         st.session_state.analysis_result = None
         st.rerun()
 
@@ -450,7 +452,7 @@ else:
 preview = draw_circle_preview(
     display_image=display_image,
     blank_orig=st.session_state.blank_point_orig,
-    sample_orig=st.session_state.sample_point_orig,
+    sample_orig_list=st.session_state.sample_points_orig,
     scale=scale,
     radius_disp=ROI_RADIUS_DISP
 )
@@ -477,8 +479,14 @@ if click is not None and ("x" in click) and ("y" in click):
             st.rerun()
 
     else:
-        if st.session_state.sample_point_orig != (x_orig, y_orig):
-            st.session_state.sample_point_orig = (x_orig, y_orig)
+        new_point = (x_orig, y_orig)
+
+        if new_point not in st.session_state.sample_points_orig:
+            if len(st.session_state.sample_points_orig) < 3:
+                st.session_state.sample_points_orig.append(new_point)
+            else:
+                st.session_state.sample_points_orig[-1] = new_point
+
             st.session_state.analysis_result = None
             st.rerun()
 
@@ -486,14 +494,13 @@ pos1, pos2 = st.columns(2)
 with pos1:
     st.write(f"Blank 위치: {st.session_state.blank_point_orig}")
 with pos2:
-    st.write(f"Sample 위치: {st.session_state.sample_point_orig}")
+    st.write(f"Sample 위치: {st.session_state.sample_points_orig}")
 
 if st.button("위치 확정 및 분석 실행", type="primary", use_container_width=True):
-    if st.session_state.blank_point_orig is None or st.session_state.sample_point_orig is None:
-        st.warning("Blank와 Sample 위치를 모두 선택하세요.")
+    if st.session_state.blank_point_orig is None or len(st.session_state.sample_points_orig) < 1:
+        st.warning("Blank 위치와 Sample 위치를 최소 1개 이상 선택하세요.")
     else:
         blank_x, blank_y = st.session_state.blank_point_orig
-        sample_x, sample_y = st.session_state.sample_point_orig
 
         roi_radius_orig = max(2, int(round(ROI_RADIUS_DISP / scale)))
 
@@ -505,13 +512,18 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
             keep_percent=KEEP_PERCENT
         )
 
-        sample_rgb = robust_rgb_from_circle(
-            image=image,
-            x=sample_x,
-            y=sample_y,
-            radius=roi_radius_orig,
-            keep_percent=KEEP_PERCENT
-        )
+        sample_rgbs = []
+        for sample_x, sample_y in st.session_state.sample_points_orig:
+            sample_rgb_each = robust_rgb_from_circle(
+                image=image,
+                x=sample_x,
+                y=sample_y,
+                radius=roi_radius_orig,
+                keep_percent=KEEP_PERCENT
+            )
+            sample_rgbs.append(sample_rgb_each)
+
+        sample_rgb = np.mean(np.vstack(sample_rgbs), axis=0)
 
         blank_lab = rgb_to_lab_value(blank_rgb)
         sample_lab = rgb_to_lab_value(sample_rgb)
@@ -537,6 +549,7 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
         result = {
             "blank_rgb": blank_rgb,
             "sample_rgb": sample_rgb,
+            "sample_rgbs": sample_rgbs,
             "blank_lab": blank_lab,
             "sample_lab": sample_lab,
             "deltaL": delta_l,
@@ -657,10 +670,20 @@ if st.session_state.analysis_result is not None:
         st.markdown(f"B: {round(float(res['blank_rgb'][2]), 3)}")
 
     with rgb2:
-        st.markdown("#### Sample")
+        st.markdown("#### Sample 평균")
         st.markdown(f"R: {round(float(res['sample_rgb'][0]), 3)}")
         st.markdown(f"G: {round(float(res['sample_rgb'][1]), 3)}")
         st.markdown(f"B: {round(float(res['sample_rgb'][2]), 3)}")
+
+        if len(res.get("sample_rgbs", [])) > 1:
+            st.markdown("#### 개별 Sample RGB")
+            for idx, sample_rgb_each in enumerate(res["sample_rgbs"], start=1):
+                st.markdown(
+                    f"- Sample {idx}: "
+                    f"R {round(float(sample_rgb_each[0]), 3)}, "
+                    f"G {round(float(sample_rgb_each[1]), 3)}, "
+                    f"B {round(float(sample_rgb_each[2]), 3)}"
+                )
 
     cie1, cie2 = st.columns(2)
     with cie1:
