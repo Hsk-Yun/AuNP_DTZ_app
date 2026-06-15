@@ -15,9 +15,9 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 
 # =========================================================
-# 기본 설정
+# Basic settings
 # =========================================================
-st.set_page_config(page_title="AD 전용 중금속 판독앱", layout="wide")
+st.set_page_config(page_title="AuNP@DTZ Heavy Metal Ion Detection App", layout="wide")
 
 DATA_PATH = "training_data.csv"
 AUG_PATH = "training_data_augmented.csv"
@@ -39,22 +39,22 @@ PPM_K = 3
 
 GROUPED_LABELS = ["Ag-Zn", "Cd-Mn"]
 
-st.title("AD 전용 중금속 판독앱")
+st.title("AuNP@DTZ Heavy Metal Ion Detection App")
 
 
 # =========================================================
-# 이미지 로드
+# Image loading
 # =========================================================
 def load_uploaded_image(uploaded_file):
     data = uploaded_file.getvalue()
     filename = uploaded_file.name.lower()
 
-    # RAW 파일 처리
+    # RAW file handling
     if filename.endswith(".raw"):
         try:
             import rawpy
         except ImportError:
-            st.error("RAW 파일 처리를 위해 requirements.txt에 rawpy를 추가해야 합니다.")
+            st.error("To process RAW files, add rawpy to requirements.txt.")
             st.stop()
 
         suffix = os.path.splitext(filename)[1] if os.path.splitext(filename)[1] else ".raw"
@@ -68,7 +68,7 @@ def load_uploaded_image(uploaded_file):
                 rgb = raw.postprocess()
             image = Image.fromarray(rgb).convert("RGB")
         except Exception:
-            st.error("RAW 파일을 읽는 데 실패했습니다. 해당 RAW 포맷이 지원되지 않을 수 있습니다.")
+            st.error("Failed to read the RAW file. This RAW format may not be supported.")
             st.stop()
         finally:
             try:
@@ -78,17 +78,17 @@ def load_uploaded_image(uploaded_file):
 
         return image, data
 
-    # 일반 이미지 처리
+    # Standard image handling
     try:
         image = Image.open(io.BytesIO(data)).convert("RGB")
         return image, data
     except Exception:
-        st.error("이미지 파일을 여는 데 실패했습니다.")
+        st.error("Failed to open the image file.")
         st.stop()
 
 
 # =========================================================
-# 학습 데이터 로드
+# Training data loading
 # =========================================================
 @st.cache_data
 def load_training_data():
@@ -116,7 +116,7 @@ def load_training_data():
     missing = [c for c in required_cols if c not in df.columns]
 
     if missing:
-        st.error(f"CSV에 필요한 컬럼이 없습니다: {missing}")
+        st.error(f"CSV is missing required columns: {missing}")
         st.stop()
 
     for c in FEATURES + ["ppm"]:
@@ -173,7 +173,7 @@ def load_training_data():
 
 
 # =========================================================
-# 모델 생성
+# Model building
 # =========================================================
 @st.cache_resource
 def build_group_model(df):
@@ -231,7 +231,7 @@ def build_ppm_model(metal_df, n_neighbors=PPM_K):
 
 
 # =========================================================
-# 색 계산 함수
+# Color calculation functions
 # =========================================================
 def rgb_to_lab_value(rgb):
     arr = np.array(rgb, dtype=np.float32).reshape(1, 1, 3) / 255.0
@@ -245,10 +245,10 @@ def delta_e(lab1, lab2):
 
 def robust_rgb_from_circle(image, x, y, radius, keep_percent=65):
     """
-    원형 ROI 내부에서:
-    1) 너무 밝거나 어두운 픽셀 제거
-    2) 중심색에서 너무 멀리 벗어난 픽셀 제거
-    => 반사광 / 그림자 / 배경 영향 완화
+    Inside the circular ROI:
+    1) Remove overly bright or dark pixels
+    2) Remove pixels that deviate too far from the center color
+    => Reduce reflection, shadow, and background effects
     """
     arr = np.array(image).astype(np.float32)
     h, w, _ = arr.shape
@@ -309,7 +309,7 @@ def robust_rgb_from_circle(image, x, y, radius, keep_percent=65):
 
 
 # =========================================================
-# 미리보기 이미지에 원 그리기
+# Draw circles on the preview image
 # =========================================================
 def draw_circle_preview(display_image, blank_orig, sample_orig_list, scale, radius_disp):
     img = display_image.copy()
@@ -343,7 +343,7 @@ def draw_circle_preview(display_image, blank_orig, sample_orig_list, scale, radi
 
 
 # =========================================================
-# 데이터 준비
+# Data preparation
 # =========================================================
 df = load_training_data()
 group_model = build_group_model(df)
@@ -352,7 +352,7 @@ group_classes = group_knn.classes_
 
 
 # =========================================================
-# 세션 상태 초기화
+# Session state initialization
 # =========================================================
 if "blank_point_orig" not in st.session_state:
     st.session_state.blank_point_orig = None
@@ -371,20 +371,20 @@ if "image_hash" not in st.session_state:
 
 
 # =========================================================
-# 1. 이미지 업로드
+# 1. Image upload
 # =========================================================
-st.subheader("1. 이미지를 업로드하세요")
+st.subheader("1. Upload Image")
 
 input_method = st.radio(
     "",
-    ["사진 업로드", "카메라 촬영"],
+    ["Upload Photo", "Take Photo"],
     horizontal=True,
     label_visibility="collapsed"
 )
 
 uploaded_file = None
 
-if input_method == "사진 업로드":
+if input_method == "Upload Photo":
     uploaded_file = st.file_uploader(
         "",
         type=["jpg", "jpeg", "png", "raw"],
@@ -413,26 +413,26 @@ disp_h = int(orig_h * scale)
 
 display_image = image.resize((disp_w, disp_h))
 
-st.write(f"원본 이미지 크기: {orig_w} × {orig_h}")
+st.write(f"Original image size: {orig_w} × {orig_h}")
 
 
 # =========================================================
-# 2. 영역 선택
+# 2. ROI selection
 # =========================================================
-st.subheader("2. 영역 선택")
+st.subheader("2. Select ROI")
 
 btn1, btn2, btn3 = st.columns([1, 1, 1])
 
 with btn1:
-    if st.button("Blank 선택", use_container_width=True):
+    if st.button("Select Blank", use_container_width=True):
         st.session_state.selection_mode = "blank"
 
 with btn2:
-    if st.button("Sample 선택", use_container_width=True):
+    if st.button("Select Sample", use_container_width=True):
         st.session_state.selection_mode = "sample"
 
 with btn3:
-    if st.button("영역 초기화", use_container_width=True):
+    if st.button("Reset ROI", use_container_width=True):
         st.session_state.blank_point_orig = None
         st.session_state.sample_points_orig = []
         st.session_state.analysis_result = None
@@ -440,12 +440,12 @@ with btn3:
 
 if st.session_state.selection_mode == "blank":
     st.markdown(
-        "<p style='color:#1f77b4; font-weight:700; font-size:20px;'>이미지에서 Blank 위치를 선택하세요.</p>",
+        "<p style='color:#1f77b4; font-weight:700; font-size:20px;'>Select the Blank position on the image.</p>",
         unsafe_allow_html=True
     )
 else:
     st.markdown(
-        "<p style='color:#d62728; font-weight:700; font-size:20px;'>이미지에서 Sample 위치를 선택하세요.</p>",
+        "<p style='color:#d62728; font-weight:700; font-size:20px;'>Select the Sample position on the image.</p>",
         unsafe_allow_html=True
     )
 
@@ -492,13 +492,13 @@ if click is not None and ("x" in click) and ("y" in click):
 
 pos1, pos2 = st.columns(2)
 with pos1:
-    st.write(f"Blank 위치: {st.session_state.blank_point_orig}")
+    st.write(f"Blank position: {st.session_state.blank_point_orig}")
 with pos2:
-    st.write(f"Sample 위치: {st.session_state.sample_points_orig}")
+    st.write(f"Sample position: {st.session_state.sample_points_orig}")
 
-if st.button("위치 확정 및 분석 실행", type="primary", use_container_width=True):
+if st.button("Confirm ROI and Run Analysis", type="primary", use_container_width=True):
     if st.session_state.blank_point_orig is None or len(st.session_state.sample_points_orig) < 1:
-        st.warning("Blank 위치와 Sample 위치를 최소 1개 이상 선택하세요.")
+        st.warning("Select one Blank position and at least one Sample position.")
     else:
         blank_x, blank_y = st.session_state.blank_point_orig
 
@@ -573,7 +573,7 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
 
         else:
             # =================================================
-            # 1차: Group 기준 중금속군 분류
+            # Step 1: Heavy metal group classification based on Group labels
             # =================================================
             group_pred = group_model.predict(input_df)[0]
             group_proba = group_model.predict_proba(input_df)[0]
@@ -587,8 +587,8 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
             group_df = df[df["Group"] == predicted_group].copy()
 
             # =================================================
-            # 2차: Ag-Zn, Cd-Mn처럼 그룹화된 경우만
-            # heavy metal 기준 세부 중금속 분류
+            # Step 2: Detailed metal classification only for grouped labels such as Ag-Zn and Cd-Mn
+            # Detailed heavy metal classification based on the heavy metal label
             # =================================================
             predicted_metal = predicted_group
             metal_conf = None
@@ -613,7 +613,7 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
                 predicted_metal = predicted_group
 
             # =================================================
-            # 3차: 최종 예측 중금속 기준 농도 분류
+            # Step 3: Concentration classification based on the final predicted metal
             # =================================================
             ppm_top = []
             ppm_pred = None
@@ -655,12 +655,12 @@ if st.button("위치 확정 및 분석 실행", type="primary", use_container_wi
 
 
 # =========================================================
-# 3. RGB 추출 및 CIE 변환
+# 3. RGB extraction and CIE Lab conversion
 # =========================================================
 if st.session_state.analysis_result is not None:
     res = st.session_state.analysis_result
 
-    st.subheader("3. RGB 추출 및 CIE 변환")
+    st.subheader("3. RGB Extraction and CIE Lab Conversion")
 
     rgb1, rgb2 = st.columns(2)
     with rgb1:
@@ -670,13 +670,13 @@ if st.session_state.analysis_result is not None:
         st.markdown(f"B: {round(float(res['blank_rgb'][2]), 3)}")
 
     with rgb2:
-        st.markdown("#### Sample 평균")
+        st.markdown("#### Mean Sample RGB")
         st.markdown(f"R: {round(float(res['sample_rgb'][0]), 3)}")
         st.markdown(f"G: {round(float(res['sample_rgb'][1]), 3)}")
         st.markdown(f"B: {round(float(res['sample_rgb'][2]), 3)}")
 
         if len(res.get("sample_rgbs", [])) > 1:
-            st.markdown("#### 개별 Sample RGB")
+            st.markdown("#### Individual Sample RGB")
             for idx, sample_rgb_each in enumerate(res["sample_rgbs"], start=1):
                 st.markdown(
                     f"- Sample {idx}: "
@@ -693,41 +693,40 @@ if st.session_state.analysis_result is not None:
         st.markdown(f"b: {round(float(res['sample_lab'][2]), 3)}")
 
     with cie2:
-        st.markdown("#### 변화량")
+        st.markdown("#### Color Difference")
         st.markdown(f"△L: {round(float(res['deltaL']), 3)}")
         st.markdown(f"△a: {round(float(res['deltaa']), 3)}")
         st.markdown(f"△b: {round(float(res['deltab']), 3)}")
         st.markdown(f"△E: {round(float(res['deltaE']), 3)}")
 
-
     # =====================================================
-    # 4. 예측 결과
+    # 4. Prediction results
     # =====================================================
-    st.subheader("4. 예측 결과")
+    st.subheader("4. Prediction Results")
 
     if res["is_no_metal"]:
-        st.warning("중금속 미검출 또는 반응이 약합니다.")
+        st.warning("No heavy metal detected or the colorimetric response is weak.")
         st.write(f"△E: {res['deltaE']:.2f}")
     else:
         pred1, pred2 = st.columns(2)
 
         with pred1:
-            st.success(f"예상 중금속: {res['predicted_metal']}")
+            st.success(f"Predicted Heavy Metal: {res['predicted_metal']}")
 
             if res.get("needs_metal_detail") and res.get("metal_confidence") is not None:
-                st.write(f"중금속 신뢰도: {res['metal_confidence'] * 100:.1f}%")
+                st.write(f"Heavy Metal Confidence: {res['metal_confidence'] * 100:.1f}%")
             else:
-                st.write(f"중금속 신뢰도: {res['group_confidence'] * 100:.1f}%")
+                st.write(f"Heavy Metal Confidence: {res['group_confidence'] * 100:.1f}%")
 
         with pred2:
-            st.success(f"예상 농도: {res['predicted_ppm']} ppm")
+            st.success(f"Predicted Concentration: {res['predicted_ppm']} ppm")
             if res["ppm_confidence"] is not None:
-                st.write(f"농도 신뢰도: {res['ppm_confidence'] * 100:.1f}%")
+                st.write(f"Concentration Confidence: {res['ppm_confidence'] * 100:.1f}%")
 
         cand1, cand2 = st.columns(2)
 
         with cand1:
-            st.markdown("#### 유사 중금속 후보")
+            st.markdown("#### Similar Heavy Metal Candidates")
 
             if res.get("needs_metal_detail") and len(res.get("metal_top", [])) > 0:
                 for m, p in res["metal_top"]:
@@ -737,7 +736,7 @@ if st.session_state.analysis_result is not None:
                     st.markdown(f"- {g}: {p * 100:.1f}%")
 
         with cand2:
-            st.markdown("#### 유사 농도 후보")
+            st.markdown("#### Similar Concentration Candidates")
             if len(res["ppm_top"]) > 0:
                 for ppm_val, p in res["ppm_top"]:
                     st.markdown(f"- {ppm_val} ppm: {p * 100:.1f}%")
