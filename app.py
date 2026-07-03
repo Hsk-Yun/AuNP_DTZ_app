@@ -42,8 +42,6 @@ GROUPED_LABELS = ["Ag-Zn", "Cd-Mn"]
 st.title("AuNP@DTZ Heavy Metal Ion Detection App")
 st.markdown("""
 <style>
-st.markdown("""
-<style>
 .workflow {
     display: flex;
     align-items: center;
