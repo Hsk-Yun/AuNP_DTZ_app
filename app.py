@@ -82,9 +82,30 @@ st.markdown("""
         flex-direction: column;
         align-items: stretch;
         gap: 6px;
-        padding: 12px;
-        margin: 12px 0 25px 0;
+        padding: 10px;
+        margin: 12px 0 24px 0;
     }
+
+    .step {
+        flex: none;
+        min-width: 0;
+        max-width: none;
+        width: 100%;
+        height: auto;
+        min-height: 0;
+        font-size: 13px;
+        padding: 10px 8px;
+        line-height: 1.3;
+    }
+
+    .arrow {
+        transform: rotate(90deg);
+        text-align: center;
+        font-size: 16px;
+        line-height: 1;
+        margin: 0;
+    }
+}
 
     .step {
         max-width: none;
