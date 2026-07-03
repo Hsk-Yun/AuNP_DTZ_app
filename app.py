@@ -132,7 +132,7 @@ st.markdown("""
     <div class="arrow">→</div>
     <div class="step">4. CIE Lab Conversion</div>
     <div class="arrow">→</div>
-    <div class="step">5. ML Prediction</div>
+    <div class="step">5. Prediction</div>
     <div class="arrow">→</div>
     <div class="step">6. Result Output</div>
 </div>
