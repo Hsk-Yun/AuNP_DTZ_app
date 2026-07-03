@@ -42,17 +42,88 @@ GROUPED_LABELS = ["Ag-Zn", "Cd-Mn"]
 st.title("AuNP@DTZ Heavy Metal Ion Detection App")
 st.markdown("""
 <style>
+st.markdown("""
+<style>
 .workflow {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
     gap: 8px;
     margin: 20px 0 35px 0;
     padding: 16px;
     background-color: #f8fafc;
     border-radius: 12px;
     border: 1px solid #e5e7eb;
+    flex-wrap: wrap;
+    width: 100%;
+    box-sizing: border-box;
 }
+
+.step {
+    flex: 1 1 130px;
+    min-width: 120px;
+    max-width: 180px;
+    text-align: center;
+    padding: 12px 8px;
+    background-color: white;
+    border-radius: 10px;
+    border: 1px solid #d1d5db;
+    font-size: 14px;
+    font-weight: 600;
+    box-sizing: border-box;
+}
+
+.arrow {
+    font-size: 22px;
+    font-weight: bold;
+    color: #9ca3af;
+}
+
+/* Mobile screen */
+@media (max-width: 768px) {
+    .workflow {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+        padding: 12px;
+        margin: 12px 0 25px 0;
+    }
+
+    .step {
+        max-width: none;
+        width: 100%;
+        font-size: 13px;
+        padding: 10px 8px;
+    }
+
+    .arrow {
+        transform: rotate(90deg);
+        text-align: center;
+        font-size: 18px;
+        line-height: 1;
+    }
+
+    h1 {
+        font-size: 34px !important;
+        line-height: 1.2 !important;
+    }
+}
+</style>
+
+<div class="workflow">
+    <div class="step">1. Image Upload</div>
+    <div class="arrow">→</div>
+    <div class="step">2. ROI Selection</div>
+    <div class="arrow">→</div>
+    <div class="step">3. RGB Extraction</div>
+    <div class="arrow">→</div>
+    <div class="step">4. CIE Lab Conversion</div>
+    <div class="arrow">→</div>
+    <div class="step">5. ML Prediction</div>
+    <div class="arrow">→</div>
+    <div class="step">6. Result Output</div>
+</div>
+""", unsafe_allow_html=True)
 
 .step {
     flex: 1;
