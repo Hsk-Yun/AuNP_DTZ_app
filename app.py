@@ -40,7 +40,52 @@ PPM_K = 3
 GROUPED_LABELS = ["Ag-Zn", "Cd-Mn"]
 
 st.title("AuNP@DTZ Heavy Metal Ion Detection App")
+st.markdown("""
+<style>
+.workflow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 20px 0 35px 0;
+    padding: 16px;
+    background-color: #f8fafc;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+}
 
+.step {
+    flex: 1;
+    text-align: center;
+    padding: 12px 8px;
+    background-color: white;
+    border-radius: 10px;
+    border: 1px solid #d1d5db;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.arrow {
+    font-size: 22px;
+    font-weight: bold;
+    color: #9ca3af;
+}
+</style>
+
+<div class="workflow">
+    <div class="step">1. Image Upload</div>
+    <div class="arrow">→</div>
+    <div class="step">2. ROI Selection</div>
+    <div class="arrow">→</div>
+    <div class="step">3. RGB Extraction</div>
+    <div class="arrow">→</div>
+    <div class="step">4. CIE Lab Conversion</div>
+    <div class="arrow">→</div>
+    <div class="step">5. ML Prediction</div>
+    <div class="arrow">→</div>
+    <div class="step">6. Result Output</div>
+</div>
+""", unsafe_allow_html=True)
 
 # =========================================================
 # Image loading
