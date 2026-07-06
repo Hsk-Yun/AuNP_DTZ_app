@@ -832,3 +832,25 @@ if st.session_state.analysis_result is not None:
             if len(res["ppm_top"]) > 0:
                 for ppm_val, p in res["ppm_top"]:
                     st.markdown(f"- {ppm_val} ppm: {p * 100:.1f}%")
+
+import sys
+import importlib.metadata as md
+
+st.subheader("Software version information")
+st.write("Python:", sys.version)
+
+packages = [
+    "streamlit",
+    "numpy",
+    "pandas",
+    "Pillow",
+    "scikit-image",
+    "scikit-learn",
+    "streamlit-image-coordinates"
+]
+
+for package in packages:
+    try:
+        st.write(package, md.version(package))
+    except md.PackageNotFoundError:
+        st.write(package, "not installed")
