@@ -40,6 +40,29 @@ PPM_K = 3
 GROUPED_LABELS = ["Ag-Zn", "Cd-Mn"]
 
 st.title("AuNP@DTZ Heavy Metal Ion Detection App")
+
+import sys
+import importlib.metadata as md
+
+st.subheader("Software version information")
+st.write("Python:", sys.version)
+
+packages = [
+    "streamlit",
+    "numpy",
+    "pandas",
+    "Pillow",
+    "scikit-image",
+    "scikit-learn",
+    "streamlit-image-coordinates"
+]
+
+for package in packages:
+    try:
+        st.write(package, md.version(package))
+    except md.PackageNotFoundError:
+        st.write(package, "not installed")
+
 st.markdown("""
 <style>
 .workflow {
